@@ -12,6 +12,22 @@ from .mach_zehnder_lock import df2tc
 detector_offset = 200e-3  # Volts
 
 def drive_phase(mdrec, dev='dev30794', drive_demodulator=1, drive_oscillator=1, drive_freq=100, drive_amp=1, trace_duration=1, reset_pids=False):
+    """
+    Drive the phase of the interferometer and collect demodulated timetraces.
+    
+    Args:
+        mdrec: Demodulation recorder instance
+        dev (str): Device ID
+        drive_demodulator (int): Demodulator index for phase drive
+        drive_oscillator (int): Oscillator index for phase drive
+        drive_freq (float): Drive frequency in Hz
+        drive_amp (float): Drive amplitude
+        trace_duration (float): Duration of the measurement in seconds
+        reset_pids (bool): Whether to re-enable PIDs after measurement
+    
+    Returns:
+        numpy.ndarray: Imaginary part of the demodulated signal
+    """
 
     # Turn off the PID temporarily
     mdrec.lock_in.set('/{:s}/pids/0/enable'.format(dev), 0)
@@ -45,6 +61,17 @@ def drive_phase(mdrec, dev='dev30794', drive_demodulator=1, drive_oscillator=1, 
 
 
 def calibrate_range(mdrec, dev='dev30794', **kwargs):
+    """
+    Calibrate the interferometer phase range by analyzing the phase distribution.
+    
+    Args:
+        mdrec: Demodulation recorder instance
+        dev (str): Device ID
+        **kwargs: Additional arguments passed to drive_phase
+    
+    Returns:
+        tuple: (fit parameters, covariance matrix, histogram, bin edges)
+    """
     trace = drive_phase(mdrec, dev=dev, **kwargs)
     vmin, vmax = np.min(trace), np.max(trace)
     hist, bin_edges = np.histogram(trace, bins=200, density=True, range=(vmin, vmax))
@@ -55,12 +82,33 @@ def calibrate_range(mdrec, dev='dev30794', **kwargs):
 
 
 def evaluate_visibility(par):
+    """
+    Calculate the interferometer visibility from calibration parameters.
+    
+    Args:
+        par (list): Calibration parameters [offset, Vmin, Vmax]
+    
+    Returns:
+        float: Visibility of the interference pattern
+    """
     vmin = par[1]
     vmax = par[2]
     return (vmax - vmin) / (vmax + vmin - 2*detector_offset)
 
 
 def evaluate_lock_precision(mdrec, dev='dev30794', duration=10, par):
+    """
+    Evaluate the precision of the phase lock by analyzing phase fluctuations.
+    
+    Args:
+        mdrec: Demodulation recorder instance
+        dev (str): Device ID
+        duration (float): Measurement duration in seconds
+        par (list): Calibration parameters
+    
+    Returns:
+        tuple: (lock parameters, covariance matrix, histogram, bin edges)
+    """
     dat = mdrec.record_timtrace(T=duration)
     trace = np.imag(dat['signal']['trace'])
     hist, bin_edges = np.histogram(trace, bins=200, density=True, range=(par[1], par[2]))
@@ -74,12 +122,32 @@ def evaluate_lock_precision(mdrec, dev='dev30794', duration=10, par):
 
 
 def V2phi(V, par):
+    """
+    Convert voltage to phase using calibration parameters.
+    
+    Args:
+        V (float or numpy.ndarray): Voltage values
+        par (list): Calibration parameters [offset, Vmin, Vmax]
+    
+    Returns:
+        float or numpy.ndarray: Phase values in radians
+    """
     V0 = par[1]
     V1 = par[2]
     return np.arcsin( 2*(V-V0)/(V1-V0) - 1 ) + np.pi/2
 
 
 def correction(V, par):
+    """
+    Calculate correction factor for probability density transformation.
+    
+    Args:
+        V (float or numpy.ndarray): Voltage values
+        par (list): Calibration parameters [offset, Vmin, Vmax]
+    
+    Returns:
+        float or numpy.ndarray: Correction factors
+    """
     V0 = par[1]
     V1 = par[2]
     #return (V1-V0)/2*np.sqrt((V-V0)*(V1-V))
@@ -87,13 +155,47 @@ def correction(V, par):
 
 
 def convert(V, fV, par):
+    """
+    Convert voltage probability distribution to phase probability distribution.
+    
+    Args:
+        V (numpy.ndarray): Voltage values
+        fV (numpy.ndarray): Voltage probability distribution
+        par (list): Calibration parameters
+    
+    Returns:
+        tuple: (phase values, phase probability distribution)
+    """
     print(len(V), len(fV))
     return V2phi(V, par), fV*correction(V, par)
 
 
 def lock_model(x, mu, sig2):
+    """
+    Gaussian model for locked phase distribution.
+    
+    Args:
+        x (numpy.ndarray): Phase values
+        mu (float): Mean phase
+        sig2 (float): Phase variance
+    
+    Returns:
+        numpy.ndarray: Probability density values
+    """
     return 1/np.sqrt(2*np.pi*sig2) * np.exp(- (x-mu)**2/(2*sig2))
 
 
 def unlock_model(x, A, x0, x1):
+    """
+    Model for unlocked phase distribution.
+    
+    Args:
+        x (numpy.ndarray): Phase values
+        A (float): Amplitude parameter
+        x0 (float): Lower bound
+        x1 (float): Upper bound
+    
+    Returns:
+        numpy.ndarray: Probability density values
+    """
     return A/np.sqrt( (x-x0)*(x1-x) )
