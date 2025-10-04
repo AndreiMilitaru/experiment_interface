@@ -13,7 +13,7 @@ from typing import Optional, Dict
 import threading
 import time
 from .mach_zehnder_utils.phase_calibration import (
-    calibrate_range, evaluate_visibility, evaluate_lock_precision, drive_phase
+    calibrate_range, evaluate_visibility, evaluate_lock_precision
 )
 from .mach_zehnder_utils.mach_zehnder_lock import (
     set_demodulators, set_aux_limits, set_pid_params, set_setpoint
@@ -25,7 +25,7 @@ class MachZehnderManager:
         mdrec,
         config_path: Optional[str] = None,
         load_latest_pid_config: bool = False,
-        lock_check_interval: float = 1.0,
+        lock_check_interval: float = 0.1,
     ):
         """Initialize MZ stabilization system.
         
@@ -62,7 +62,7 @@ class MachZehnderManager:
         """Create folders for storing calibration data"""
         calib_base = self._config_path / "calibrations"
         calib_base.mkdir(exist_ok=True)
-        for calib_type in ['range', 'visibility', 'lock_precision']:
+        for calib_type in ['range', 'visibility', 'lock_precision', 'pid_config']:
             (calib_base / calib_type).mkdir(exist_ok=True)
     
     def _setup_demodulators(self):
@@ -85,20 +85,9 @@ class MachZehnderManager:
         
         self._demod_config = demod_config
     
-    @property
-    def demodulators_enabled(self) -> Dict[int, bool]:
-        """Return dictionary of demodulator states"""
-        # TODO: Implement demodulator status check
-        pass
-    
-    @property
-    def pid_states(self) -> Dict[int, bool]:
-        """Return dictionary of PID controller states"""
-        # TODO: Implement PID state check
-        pass
-    
     def perform_range_calibration(self) -> Dict:
         """Perform range calibration and save results"""
+
         par, cov, hist, edges = calibrate_range(
             self._mdrec,
             dev=self._device_id,
@@ -118,6 +107,77 @@ class MachZehnderManager:
         self._save_calibration_data(path, data)
         return data
     
+    def save_current_pid_config(self):
+        """Save current PID configuration to file"""
+        piezo_config = self._config['pid']['piezo']
+        laser_config = self._config['pid']['laser']
+        
+        piezo_params = {
+            'p': self._mdrec.lock_in.get(f'/{self._device_id}/pids/{piezo_config["pid_number"]}/p'),
+            'i': self._mdrec.lock_in.get(f'/{self._device_id}/pids/{piezo_config["pid_number"]}/i'),
+            'd': self._mdrec.lock_in.get(f'/{self._device_id}/pids/{piezo_config["pid_number"]}/d'),
+            'setpoint': self._mdrec.lock_in.get(f'/{self._device_id}/pids/{piezo_config["pid_number"]}/setpoint')
+        }
+        
+        laser_params = {
+            'p': self._mdrec.lock_in.get(f'/{self._device_id}/pids/{laser_config["pid_number"]}/p'),
+            'i': self._mdrec.lock_in.get(f'/{self._device_id}/pids/{laser_config["pid_number"]}/i'),
+            'd': self._mdrec.lock_in.get(f'/{self._device_id}/pids/{laser_config["pid_number"]}/d'),
+            'setpoint': self._mdrec.lock_in.get(f'/{self._device_id}/pids/{laser_config["pid_number"]}/setpoint')
+        }
+        
+        data = {
+            'piezo_params': piezo_params,
+            'laser_params': laser_params,
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        path = self._config_path / self._config['calibration_paths']['pid_config']
+        self._save_calibration_data(path, data)
+
+    def load_latest_pid_config(self) -> Optional[Dict]:
+        """Load the most recent PID configuration"""
+        path = self._config_path / self._config['calibration_paths']['pid_config']
+        if not path.exists():
+            return None
+        
+        pid_data = np.load(str(path), allow_pickle=True).item()
+        piezo_config = self._config['pid']['piezo']
+        laser_config = self._config['pid']['laser']
+        
+        set_pid_params(
+            self._mdrec,
+            dev=self._device_id,
+            piezo_params=pid_data['piezo_params'],
+            laser_params=pid_data['laser_params'],
+            piezo_aux=piezo_config['pid_number'],
+            laser_aux=laser_config['pid_number'],
+            demodulator=self._config['demodulators']['main']['demodulator'],
+            piezo_out=piezo_config['aux'],
+            laser_out=laser_config['aux'],
+            piezo_center=piezo_config['center'],
+            laser_range=laser_config['limit_upper']
+        )
+        return pid_data
+
+    def perform_visibility_calibration(self, range_parameters: Optional[np.ndarray] = None) -> Dict:
+        """Perform visibility calibration and save results"""
+        if range_parameters is None:
+            range_calib = self._load_latest_calibration('range')
+            if range_calib is None:
+                raise ValueError("No range calibration found. Run range calibration first.")
+            range_parameters = range_calib['parameters']
+        
+        visibility = evaluate_visibility(range_parameters)
+        data = {
+            'visibility': visibility,
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        path = self._config_path / self._config['calibration_paths']['visibility']
+        self._save_calibration_data(path, data)
+        return data
+
     def evaluate_current_lock(self, use_latest_calibration: bool = True) -> Dict:
         """Evaluate current lock precision"""
         if use_latest_calibration:
@@ -163,34 +223,7 @@ class MachZehnderManager:
             return None
         # Calculate quality metric based on lock parameters
         sigma = np.sqrt(lock_data['lock_parameters'][1])  # standard deviation
-        return 1.0 / (1.0 + sigma)  # normalized quality metric
-    
-    def estimate_phase_quality(
-        self,
-        run_calibration: bool = False,
-        calibration_values: Optional[Dict] = None
-    ) -> float:
-        """Estimate quality of phase lock
-        
-        Args:
-            run_calibration: Whether to run new calibration
-            calibration_values: Previously measured calibration values
-        
-        Returns:
-            float: Quality metric between 0 and 1
-        """
-        if run_calibration:
-            # TODO: Implement calibration routine
-            pass
-        elif calibration_values is None:
-            raise ValueError("Must either run calibration or provide calibration values")
-            
-        # TODO: Implement phase quality estimation
-        
-    def load_latest_pid_config(self):
-        """Load most recent PID configuration from config folder"""
-        # TODO: Implement PID config loading
-        pass
+        return sigma
     
     def set_aux_limits(self):
         """Set auxiliary output limits for piezo and laser channels"""

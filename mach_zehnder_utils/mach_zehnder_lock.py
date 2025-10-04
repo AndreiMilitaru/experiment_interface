@@ -133,7 +133,7 @@ def set_setpoint(mdrec, new_value, dev='dev30794'):
     mdrec.lock_in.set('/{:s}/pids/3/setpoint', new_value)
 
 
-def set_pid_params(mdrec, dev='dev30794', piezo_params=None, laser_params=None, piezo_aux=0, laser_aux=3, demodulator=1, 
+def set_pid_params(mdrec, dev='dev30794', piezo_params=None, laser_params=None, piezo_pid=0, laser_pid=3, demodulator=1, 
                    piezo_out=0, laser_out=3, piezo_center=2.5, laser_range=0.1):
     """
     Configure PID controller parameters for both piezo and laser channels.
@@ -161,18 +161,18 @@ def set_pid_params(mdrec, dev='dev30794', piezo_params=None, laser_params=None, 
     mdrec.lock_in.set(f'/{dev}/pids/3/p', laser_params[0])
     mdrec.lock_in.set(f'/{dev}/pids/3/i', laser_params[1])
 
-    mdrec.lock_in.set(f'/{dev}/pids/{piezo_aux}/input', 1)
-    mdrec.lock_in.set(f'/{dev}/pids/{piezo_aux}/inputchannel', demodulator-1)
-    mdrec.lock_in.set(f'/{dev}/pids/{piezo_aux}/output', 5)
-    mdrec.lock_in.set(f'/{dev}/pids/{piezo_aux}/outputchannel', piezo_out)
-    mdrec.lock_in.set(f'/{dev}/pids/{piezo_aux}/center', piezo_center)
-    mdrec.lock_in.set(f'/{dev}/pids/{piezo_aux}/limitlower', -piezo_center)
-    mdrec.lock_in.set(f'/{dev}/pids/{piezo_aux}/limitupper', piezo_center)
+    mdrec.lock_in.set(f'/{dev}/pids/{piezo_pid}/input', 1)
+    mdrec.lock_in.set(f'/{dev}/pids/{piezo_pid}/inputchannel', demodulator-1)
+    mdrec.lock_in.set(f'/{dev}/pids/{piezo_pid}/output', 5)
+    mdrec.lock_in.set(f'/{dev}/pids/{piezo_pid}/outputchannel', piezo_out)
+    mdrec.lock_in.set(f'/{dev}/pids/{piezo_pid}/center', piezo_center)
+    mdrec.lock_in.set(f'/{dev}/pids/{piezo_pid}/limitlower', -piezo_center)
+    mdrec.lock_in.set(f'/{dev}/pids/{piezo_pid}/limitupper', piezo_center)
 
-    mdrec.lock_in.set(f'/{dev}/pids/{laser_aux}/input', 1)
-    mdrec.lock_in.set(f'/{dev}/pids/{laser_aux}/inputchannel', demodulator-1)
-    mdrec.lock_in.set(f'/{dev}/pids/{laser_aux}/output', 5)
-    mdrec.lock_in.set(f'/{dev}/pids/{laser_aux}/outputchannel', laser_out)
-    mdrec.lock_in.set(f'/{dev}/pids/{laser_aux}/center', 0)
-    mdrec.lock_in.set(f'/{dev}/pids/{laser_aux}/limitlower', -laser_range)
-    mdrec.lock_in.set(f'/{dev}/pids/{laser_aux}/limitupper', laser_range)
+    mdrec.lock_in.set(f'/{dev}/pids/{laser_pid}/input', 1)
+    mdrec.lock_in.set(f'/{dev}/pids/{laser_pid}/inputchannel', demodulator-1)
+    mdrec.lock_in.set(f'/{dev}/pids/{laser_pid}/output', 5)
+    mdrec.lock_in.set(f'/{dev}/pids/{laser_pid}/outputchannel', laser_out)
+    mdrec.lock_in.set(f'/{dev}/pids/{laser_pid}/center', 0)
+    mdrec.lock_in.set(f'/{dev}/pids/{laser_pid}/limitlower', -laser_range)
+    mdrec.lock_in.set(f'/{dev}/pids/{laser_pid}/limitupper', laser_range)
