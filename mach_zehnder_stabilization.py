@@ -16,7 +16,7 @@ from .mach_zehnder_utils.phase_calibration import (
     calibrate_range, evaluate_visibility, evaluate_lock_precision
 )
 from .mach_zehnder_utils.mach_zehnder_lock import (
-    set_demodulators, set_aux_limits, set_pid_params, set_setpoint
+    set_demodulators, set_aux_limits, set_pid_params, set_setpoint, check_locks
 )
 
 class MachZehnderManager:
