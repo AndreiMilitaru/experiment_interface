@@ -75,7 +75,7 @@ def calibrate_range(mdrec, dev='dev30794', **kwargs):
     hist, bin_edges = np.histogram(trace, bins=200, density=True, range=(vmin, vmax))
     vmin, vmax = np.min(trace), np.max(trace)
     guess = [np.min(hist[1:-2])*(vmax-vmin)/2, vmin, vmax]
-    par, cov = curve_fit(unlock_model, bins[1:-3], hist[1:-2], guess)
+    par, cov = curve_fit(unlock_model, bin_edges[1:-3], hist[1:-2], guess)
     return par, cov, hist, bin_edges
 
 
@@ -94,7 +94,7 @@ def evaluate_visibility(par):
     return (vmax - vmin) / (vmax + vmin - 2*detector_offset)
 
 
-def evaluate_lock_precision(mdrec, dev='dev30794', duration=10, par):
+def evaluate_lock_precision(mdrec, par, dev='dev30794', duration=10):
     """
     Evaluate the precision of the phase lock by analyzing phase fluctuations.
     
@@ -148,7 +148,6 @@ def correction(V, par):
     """
     V0 = par[1]
     V1 = par[2]
-    #return (V1-V0)/2*np.sqrt((V-V0)*(V1-V))
     return np.sqrt(-(V-V0)**2 + (V-V0)*(V1-V0))
 
 

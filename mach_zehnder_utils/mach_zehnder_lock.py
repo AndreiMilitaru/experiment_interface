@@ -133,7 +133,8 @@ def set_setpoint(mdrec, new_value, dev='dev30794'):
     mdrec.lock_in.set('/{:s}/pids/3/setpoint', new_value)
 
 
-def set_pid_params(mdrec, dev='dev30794', piezo_params=None, laser_params=None, piezo_pid=0, laser_pid=3, demodulator=1, 
+def set_pid_params(mdrec, dev='dev30794', piezo_params=None, laser_params=None, 
+                   piezo_pid=0, laser_pid=3, demodulator=1, 
                    piezo_out=0, laser_out=3, piezo_center=2.5, laser_range=0.1):
     """
     Configure PID controller parameters for both piezo and laser channels.
