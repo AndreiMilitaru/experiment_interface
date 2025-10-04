@@ -1,0 +1,56 @@
+device:
+  id: 'dev30794'
+  detector_offset: 0.2  # 200mV
+
+demodulators:
+  main:
+    oscillator: 0
+    demodulator: 1
+    order: 1
+    rate: 53.57e3
+    bandwidth: 20e3
+  
+  phase_drive:
+    index: 1
+    oscillator: 1
+    frequency: 100  # Hz
+    amplitude: 1
+    adc_select: 174
+
+pid:
+  piezo:
+    params: [0, 1e3, 0]  # P, I, D
+    pid_number: 0
+    aux: 0
+    center: 2.5
+    limit_lower: -2.5
+    limit_upper: 2.5
+    input: 1
+    inputchannel: 0  # demodulator-1
+    output: 5
+  
+  laser:
+    params: [-100e-3, -15e-3, 0]  # P, I, D
+    pid_number: 3
+    aux: 3
+    center: 0
+    limit_lower: -0.1
+    limit_upper: 0.1
+    input: 1
+    inputchannel: 0  # demodulator-1
+    output: 5
+
+aux_limits:
+  piezo:
+    min: 0
+    max: 5
+    center: 2.5
+  laser:
+    min: -0.1
+    max: 0.1
+    center: 0
+
+calibration_paths:
+  range: 'calibrations/range_calibration.npy'
+  visibility: 'calibrations/visibility.npy'
+  lock_precision: 'calibrations/lock_precision.npy'

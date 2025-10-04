@@ -365,3 +365,5 @@ FodyWeavers.xsd
 testing_ZIAPI.ipynb
 /.ipynb_checkpoints/testing_ZIAPI-checkpoint.ipynb
 /utils/.ipynb_checkpoints/set_axes-checkpoint.py
+zhinst_utils/.DS_Store
+.DS_Store

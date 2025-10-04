@@ -7,7 +7,7 @@ Description: Utilities for calibrating the phase signal at the Mach Zehnder outp
 
 import numpy as np
 from scipy.optimize import curve_fit
-from .mach_zehnder_lock import df2tc
+from .mach_zehnder_lock import df2tc, toggle_locks
 
 detector_offset = 200e-3  # Volts
 
@@ -30,8 +30,7 @@ def drive_phase(mdrec, dev='dev30794', drive_demodulator=1, drive_oscillator=1, 
     """
 
     # Turn off the PID temporarily
-    mdrec.lock_in.set('/{:s}/pids/0/enable'.format(dev), 0)
-    mdrec.lock_in.set('/{:s}/pids/3/enable'.format(dev), 0)
+    toggle_locks(mdrec, False, dev=dev)
 
     # Set the drive parameters
     mdrec.lock_in.set('/{:s}/oscs/{:d}/freq'.format(dev, drive_oscillator), drive_freq)
@@ -54,8 +53,7 @@ def drive_phase(mdrec, dev='dev30794', drive_demodulator=1, drive_oscillator=1, 
 
     # Resetting the PID if needed
     if reset_pids:
-        mdrec.lock_in.set('/{:s}/pids/0/enable'.format(dev), 1)
-        mdrec.lock_in.set('/{:s}/pids/3/enable'.format(dev), 1)
+        toggle_locks(mdrec, True, dev=dev)
 
     return np.imag(dat['signal']['trace'])
 

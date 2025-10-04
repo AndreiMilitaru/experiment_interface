@@ -26,25 +26,14 @@ def df2tc(freq):
 
 
 def set_demodulators(mdrec, dev='dev30794', oscillator=0, demodulator=1, order=1, rate=53.57e3, bandwidth=20e3):
-    """
-    Configure demodulator settings for the Zurich Instruments lock-in amplifier.
-    
-    Args:
-        mdrec: Demodulation recorder instance
-        dev (str): Device ID
-        oscillator (int): Oscillator index
-        demodulator (int): Demodulator index
-        order (int): Filter order
-        rate (float): Sampling rate in Hz
-        bandwidth (float): Demodulator bandwidth in Hz
-    """
-    mdrec.lock_in.set('/{:s}/oscs/{:d}/freq'.format(dev, oscillator), 0.)
-    mdrec.lock_in.set('/{:s}/demods/{:d}/oscselect'.format(dev, demodulator), oscillator)
-    mdrec.lock_in.set('/{:s}/demods/{:d}/adcselect'.format(dev, demodulator), 0)
-    mdrec.lock_in.set('/{:s}/demods/{:d}/order'.format(dev, demodulator), order)
-    mdrec.lock_in.set('/{:s}/demods/{:d}/timeconstant'.format(dev, demodulator), df2tc(bandwidth))
-    mdrec.lock_in.set('/{:s}/demods/{:d}/rate'.format(dev, demodulator), rate)
-    mdrec.lock_in.set('/{:s}/demods/{:d}/enable'.format(dev, demodulator), 1)
+    """Configure demodulator settings for the Zurich Instruments lock-in amplifier."""
+    mdrec.lock_in.set(f'/{dev}/oscs/{oscillator}/freq', 0.)
+    mdrec.lock_in.set(f'/{dev}/demods/{demodulator}/oscselect', oscillator)
+    mdrec.lock_in.set(f'/{dev}/demods/{demodulator}/adcselect', 0)
+    mdrec.lock_in.set(f'/{dev}/demods/{demodulator}/order', order)
+    mdrec.lock_in.set(f'/{dev}/demods/{demodulator}/timeconstant', df2tc(bandwidth))
+    mdrec.lock_in.set(f'/{dev}/demods/{demodulator}/rate', rate)
+    mdrec.lock_in.set(f'/{dev}/demods/{demodulator}/enable', 1)
     mdrec.set_demod_list({'signal': (dev, 0)})
 
 
@@ -62,38 +51,73 @@ def set_aux_limits(mdrec, dev='dev30794', aux_lim=None, laser_lim=None):
         aux_lim = [0, 5]
     if laser_lim is None:
         laser_lim = [-0.1, 0.1]
-    mdrec.lock_in.set('/{:s}/auxouts/0/limitlower'.format(dev), aux_lim[0])
-    mdrec.lock_in.set('/{:s}/auxouts/0/limitupper'.format(dev), aux_lim[1])
-    mdrec.lock_in.set('/{:s}/auxouts/0/offset'.format(dev), (aux_lim[0] + aux_lim[1])/2)
-    mdrec.lock_in.set('/{:s}/auxouts/3/offsetmin'.format(dev), laser_lim[0])
-    mdrec.lock_in.set('/{:s}/auxouts/3/limitupper'.format(dev), laser_lim[1])
-    mdrec.lock_in.set('/{:s}/auxouts/3/offset'.format(dev), 0)
+    mdrec.lock_in.set(f'/{dev}/auxouts/0/limitlower', aux_lim[0])
+    mdrec.lock_in.set(f'/{dev}/auxouts/0/limitupper', aux_lim[1])
+    mdrec.lock_in.set(f'/{dev}/auxouts/0/offset', (aux_lim[0] + aux_lim[1])/2)
+    mdrec.lock_in.set(f'/{dev}/auxouts/3/offsetmin', laser_lim[0])
+    mdrec.lock_in.set(f'/{dev}/auxouts/3/limitupper', laser_lim[1])
+    mdrec.lock_in.set(f'/{dev}/auxouts/3/offset', 0)
 
 
-def check_locks(mdrec, dev='dev30794', channels=None):
+def toggle_locks(mdrec, enable, dev='dev30794'):
     """
-        Check if the lock offsets are within acceptable ranges and reset them if they are not.
-        The assumption is that the piezo channel is controlled via auxout 0 and the laser channel via auxout 3.
+    Enable or disable the PID controllers for piezo and laser locks.
     
-        Args:
-            mdrec: Demodulation recorder instance
-            dev (str): Device ID
-            channels (list): List of channels to check ('piezo', 'laser')
+    Args:
+        mdrec: Demodulation recorder instance
+        enable (int): 1 or True to enable, 0 or False to disable
+        dev (str): Device ID
+    """
+    if type(enable) is bool:
+        enable = int(enable)
+    mdrec.lock_in.setInt(f'/{dev}/pids/0/enable', enable)
+    mdrec.lock_in.setInt(f'/{dev}/pids/3/enable', enable)
+
+
+def check_channel(mdrec, dev: str, pid_num: int, aux_num: int, tolerance_percent: float = 85) -> None:
+    """Check if a specific channel's lock offset is within acceptable range and reset if needed.
+    
+    Args:
+        mdrec: Demodulation recorder instance
+        dev (str): Device ID
+        pid_num (int): PID controller number
+        aux_num (int): Auxiliary output number
+        tolerance_percent (float): Percentage of range to consider as valid
+    """
+    center = mdrec.lock_in.getDouble(f'/{dev}/pids/{pid_num}/center')
+    lower = mdrec.lock_in.getDouble(f'/{dev}/pids/{pid_num}/limitlower')
+    upper = mdrec.lock_in.getDouble(f'/{dev}/pids/{pid_num}/limitupper')
+    total_range = upper - lower
+    allowed_deviation = (total_range * tolerance_percent) / 100
+
+    val = mdrec.lock_in.getDouble(f'/{dev}/auxouts/{aux_num}/offset')
+    if not (center - allowed_deviation) < val < (center + allowed_deviation):
+        mdrec.lock_in.setInt(f'/{dev}/pids/{pid_num}/enable', 0)
+        mdrec.lock_in.setDouble(f'/{dev}/auxouts/{aux_num}/offset', center)
+        mdrec.lock_in.setInt(f'/{dev}/pids/{pid_num}/enable', 1)
+
+
+def check_locks(mdrec, dev='dev30794', channels=None, tolerance_percent=85,
+                piezo_pid=0, piezo_aux=0, laser_pid=3, laser_aux=3):
+    """Check if lock offsets are within acceptable ranges and reset if needed.
+    
+    Args:
+        mdrec: Demodulation recorder instance
+        dev (str): Device ID
+        channels (list): List of channels to check ('piezo', 'laser')
+        tolerance_percent (float): Percentage of range to consider as valid
+        piezo_pid (int): PID number for piezo channel
+        piezo_aux (int): Auxiliary output number for piezo
+        laser_pid (int): PID number for laser channel
+        laser_aux (int): Auxiliary output number for laser
     """
     if channels is None:
         channels = ['piezo', 'laser']
-    if 'aux' in channels:
-        val = mdrec.lock_in.getDouble('/{:s}/auxouts/0/offset'.format(dev))
-        if not 0.3 < val < 4.7:
-            mdrec.lock_in.setInt('/{:s}/pids/0/enable'.format(dev), 0)
-            mdrec.lock_in.setDouble('/{:s}/auxouts/0/offset'.format(dev), 2.5)
-            mdrec.lock_in.setInt('/{:s}/pids/0/enable'.format(dev), 1)
+
+    if 'piezo' in channels:
+        check_channel(mdrec, dev, piezo_pid, piezo_aux, tolerance_percent)
     if 'laser' in channels:
-        val = mdrec.lock_in.getDouble('/{:s}/auxouts/3/offset'.format(dev))
-        if not -80e-3 < val < 80e-3:
-            mdrec.lock_in.setInt('/{:s}/pids/3/enable'.format(dev), 0)
-            mdrec.lock_in.setDouble('/{:s}/auxouts/3/offset'.format(dev), 0)
-            mdrec.lock_in.setInt('/{:s}/pids/3/enable'.format(dev), 1)
+        check_channel(mdrec, dev, laser_pid, laser_aux, tolerance_percent)
 
 
 def set_setpoint(mdrec, new_value, dev='dev30794'):
@@ -132,23 +156,23 @@ def set_pid_params(mdrec, dev='dev30794', piezo_params=None, laser_params=None, 
     if laser_params is None:
         laser_params = default_laser_parametrs
 
-    mdrec.lock_in.set('/{:s}/pids/0/p'.format(dev), piezo_params[0])
-    mdrec.lock_in.set('/{:s}/pids/0/i'.format(dev), piezo_params[1])
-    mdrec.lock_in.set('/{:s}/pids/3/p'.format(dev), laser_params[0])
-    mdrec.lock_in.set('/{:s}/pids/3/i'.format(dev), laser_params[1])
+    mdrec.lock_in.set(f'/{dev}/pids/0/p', piezo_params[0])
+    mdrec.lock_in.set(f'/{dev}/pids/0/i', piezo_params[1])
+    mdrec.lock_in.set(f'/{dev}/pids/3/p', laser_params[0])
+    mdrec.lock_in.set(f'/{dev}/pids/3/i', laser_params[1])
 
-    mdrec.lock_in.set('/{:s}/pids/{:d}/input'.format(dev, piezo_aux), 1)
-    mdrec.lock_in.set('/{:s}/pids/{:d}/inputchannel'.format(dev, piezo_aux), demodulator-1)
-    mdrec.lock_in.set('/{:s}/pids/{:d}/output'.format(dev, piezo_aux), 5)
-    mdrec.lock_in.set('/{:s}/pids/{:d}/outputchannel'.format(dev, piezo_aux), piezo_out)
-    mdrec.lock_in.set('/{:s}/pids/{:d}/center'.format(dev, piezo_aux), piezo_center)
-    mdrec.lock_in.set('/{:s}/pids/{:d}/limitlower'.format(dev, piezo_aux), -piezo_center)
-    mdrec.lock_in.set('/{:s}/pids/{:d}/limitupper'.format(dev, piezo_aux), piezo_center)
+    mdrec.lock_in.set(f'/{dev}/pids/{piezo_aux}/input', 1)
+    mdrec.lock_in.set(f'/{dev}/pids/{piezo_aux}/inputchannel', demodulator-1)
+    mdrec.lock_in.set(f'/{dev}/pids/{piezo_aux}/output', 5)
+    mdrec.lock_in.set(f'/{dev}/pids/{piezo_aux}/outputchannel', piezo_out)
+    mdrec.lock_in.set(f'/{dev}/pids/{piezo_aux}/center', piezo_center)
+    mdrec.lock_in.set(f'/{dev}/pids/{piezo_aux}/limitlower', -piezo_center)
+    mdrec.lock_in.set(f'/{dev}/pids/{piezo_aux}/limitupper', piezo_center)
 
-    mdrec.lock_in.set('/{:s}/pids/{:d}/input'.format(dev, laser_aux), 1)
-    mdrec.lock_in.set('/{:s}/pids/{:d}/inputchannel'.format(dev, laser_aux), demodulator-1)
-    mdrec.lock_in.set('/{:s}/pids/{:d}/output'.format(dev, laser_aux), 5)
-    mdrec.lock_in.set('/{:s}/pids/{:d}/outputchannel'.format(dev, laser_aux), laser_out)
-    mdrec.lock_in.set('/{:s}/pids/{:d}/center'.format(dev, laser_aux), 0)
-    mdrec.lock_in.set('/{:s}/pids/{:d}/limitlower'.format(dev, laser_aux), -laser_range)
-    mdrec.lock_in.set('/{:s}/pids/{:d}/limitupper'.format(dev, laser_aux), laser_range)
+    mdrec.lock_in.set(f'/{dev}/pids/{laser_aux}/input', 1)
+    mdrec.lock_in.set(f'/{dev}/pids/{laser_aux}/inputchannel', demodulator-1)
+    mdrec.lock_in.set(f'/{dev}/pids/{laser_aux}/output', 5)
+    mdrec.lock_in.set(f'/{dev}/pids/{laser_aux}/outputchannel', laser_out)
+    mdrec.lock_in.set(f'/{dev}/pids/{laser_aux}/center', 0)
+    mdrec.lock_in.set(f'/{dev}/pids/{laser_aux}/limitlower', -laser_range)
+    mdrec.lock_in.set(f'/{dev}/pids/{laser_aux}/limitupper', laser_range)
