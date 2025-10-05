@@ -1,7 +1,6 @@
 from dataclasses import dataclass, asdict
 from typing import Optional, Sequence
 import yaml
-from pathlib import Path
 
 @dataclass
 class PlotStyle:
@@ -12,16 +11,23 @@ class PlotStyle:
     xlabel: Optional[str] = None
     ylabel: Optional[str] = None
     title: Optional[str] = None
-    xticks: Optional[Sequence[float]] = None
-    yticks: Optional[Sequence[float]] = None
-    xticklabels: Optional[Sequence[str]] = None
-    yticklabels: Optional[Sequence[str]] = None
     legend: bool = False
     axis: Optional[Sequence[float]] = None
     colorbar: bool = False
     grid: bool = True
     grid_alpha: float = 0.3
     tick_direction: str = 'in'
+
+    # Colorbar specific parameters
+    cbar_label: Optional[str] = None
+    cbar_labelpad: Optional[float] = None
+    cbar_ticks: Optional[Sequence[float]] = None
+    cbar_ticklabels: Optional[Sequence[str]] = None
+    cbar_orientation: str = 'vertical'
+    cbar_position: str = 'right'  # 'right'/'left' for vertical, 'top'/'bottom' for horizontal
+    cbar_fraction: float = 0.15
+    cbar_pad: float = 0.05
+    cbar_label_position: str = 'left'  # Add this line
 
     def save(self, filepath: str):
         """Save style to YAML file"""

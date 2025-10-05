@@ -1,6 +1,6 @@
 """
 Module to record demodulator time traces from Zurich Instruments lock-in amplifiers.
-Code was previously written in the Photonics Laboratory of ETH Zurich by Felix Tebbenjohanns.
+Code was originally written in the Photonics Laboratory of ETH Zurich by Felix Tebbenjohanns.
 """
 
 import zhinst.ziPython as ziPython
@@ -15,6 +15,16 @@ class mfli_demod_recorder(object):
         
         
 class zhinst_demod_recorder(object):
+    """
+    Class to handle demodulator recording from Zurich Instruments devices.
+    
+    Parameters
+    ----------
+    data_server_ip : str
+        IP address of the Zurich Instruments data server
+    devtype : str, optional
+        Type of device ('MFLI' or 'HF2LI')
+    """
     def __init__(self, data_server_ip, devtype = 'MFLI'):
         if devtype == 'MFLI':
             self.lock_in = ziPython.ziDAQServer(data_server_ip, 8004, 5)
@@ -27,6 +37,26 @@ class zhinst_demod_recorder(object):
         self.demod_dict = {}
 
     def convertFilter_3dBfreq_tc(self, filter_order, filter_tc_or3dBfreq):
+        """
+        Convert between filter 3dB frequency and time constant.
+        
+        Parameters
+        ----------
+        filter_order : int
+            Order of the filter
+        filter_tc_or3dBfreq : float
+            Time constant or 3dB frequency to convert
+            
+        Returns
+        -------
+        float
+            Converted value
+        
+        Notes
+        -----
+        See MFLI UserManual, page 315, table 6.1
+        chapter 6, Signal Processing Basics
+        """
         # see MFLI UserManual, page 315, table 6.1
         # chapter 6, Signal Processing Basics
         FO = np.array([1, 0.6436, 0.5098, 0.4350, 0.3856, 0.3499, 0.3226, 0.3008])
@@ -34,6 +64,20 @@ class zhinst_demod_recorder(object):
     
     
     def config_demods(self, device, demod_index, config_dict):
+        """
+        Configure demodulator settings.
+        
+        Parameters
+        ----------
+        device : str
+            Device ID
+        demod_index : int
+            Index of the demodulator to configure
+        config_dict : dict
+            Dictionary containing configuration parameters
+            Possible keys: 'filter3dB', 'oscselect', 'harmonic', 'order',
+            'adcselect', 'enable', 'phaseshift', 'timeconstant', 'rate', 'freq'
+        """
         processed_keys = []
         if 'filter3dB' in config_dict: # this needs to be converted to a timeconstant
             processed_keys.append('filter3dB')
@@ -66,6 +110,29 @@ class zhinst_demod_recorder(object):
         
         
     def get_demod_info(self, device, demod_index):
+        """
+        Get current demodulator settings.
+        
+        Parameters
+        ----------
+        device : str
+            Device ID
+        demod_index : int
+            Index of the demodulator
+            
+        Returns
+        -------
+        dict
+            Dictionary containing demodulator settings:
+            - freq: Oscillator frequency
+            - order: Filter order
+            - TC: Time constant
+            - BW3dB: 3dB bandwidth
+            - fs: Sampling rate
+            - phaseshift: Phase shift
+            - harmonic: Harmonic number
+            - input_channel: Input channel number
+        """
         oscselect = self.lock_in.getInt('/%s/demods/%i/oscselect' % (device, demod_index))
         freq = self.lock_in.getDouble('/%s/oscs/%i/freq' % (device, oscselect))
         harmonic = self.lock_in.getInt('/%s/demods/%i/harmonic' % (device, oscselect))
@@ -155,8 +222,38 @@ class zhinst_demod_recorder(object):
                   spectraldensity=1,
                   pwr_two=True):
         """
-        Added by Massi on 03.08.21
+        Added by Massiliano Rossi on 03.08.21
         Seetings the scope and acquire data with the ScopeModule.
+        
+        Parameters
+        ----------
+        dev : str
+            Device ID
+        T : float
+            Duration for recording [s]
+        samp_rate : float
+            Desired sampling rate [Hz]
+        inputenable : int
+            Bit-encoded value to enable scope channels
+        inputselect : list of int
+            List of input channels to select for the scope
+        mode : int
+            Scope data processing mode
+        num_averages : int
+            Number of averages for the moving average
+        historylength : int
+            Number of scope records to keep in the module's memory
+        power : int
+            FFT power
+        spectraldensity : int
+            Spectral density flag
+        pwr_two : bool
+            Flag to adjust T_pts to power of two
+            
+        Returns
+        -------
+        dict
+            Dictionary containing scope data
         """
         clockbase = self.lock_in.getInt('/{:s}/clockbase'.format(dev))
         samp_rate = clockbase/2**round(np.log2(clockbase/samp_rate))
@@ -258,8 +355,15 @@ class zhinst_demod_recorder(object):
     
     def synchronize_devices(self, device_ids, synchronize=True):
         """
-        Added by Massi on 03.08.21
+        Added by Massiliano Rossi on 03.08.21
         Synchronize different devices together vis the MDS module
+        
+        Parameters
+        ----------
+        device_ids : list of str
+            List of device IDs to synchronize
+        synchronize : bool, optional
+            Flag to enable or disable synchronization
         """
         discovery = ziPython.ziDiscovery()
         props = []
@@ -326,6 +430,52 @@ class zhinst_demod_recorder(object):
             gain_d=0,
             bw_d=0,
             rate=2.1e6):
+        """
+        Set PID controller parameters.
+        
+        Parameters
+        ----------
+        dev : str
+            Device ID
+        pid : int
+            PID controller index
+        mode : int, optional
+            Mode of the PID controller
+        inputchannel : int, optional
+            Input channel for the PID controller
+        inputselect : int, optional
+            Input select for the PID controller
+        setpoint : float, optional
+            Setpoint value for the PID controller
+        phaseunwrap : int, optional
+            Phase unwrap flag
+        bw : float, optional
+            Bandwidth for the PID controller
+        order : int, optional
+            Order of the PID controller
+        harmonic : int, optional
+            Harmonic number for the PID controller
+        outputselect : int, optional
+            Output select for the PID controller
+        outputchannel : int, optional
+            Output channel for the PID controller
+        out_center : float, optional
+            Center value for the output
+        out_low : float, optional
+            Lower limit for the output
+        out_high : float, optional
+            Upper limit for the output
+        gain_p : float, optional
+            Proportional gain
+        gain_i : float, optional
+            Integral gain
+        gain_d : float, optional
+            Derivative gain
+        bw_d : float, optional
+            Bandwidth for the derivative filter
+        rate : float, optional
+            Rate for the PID controller
+        """
         self.lock_in.setInt('/{:s}/pids/{:d}/mode'.format(dev, pid), mode)
         # Input
         self.lock_in.setInt('/{:s}/pids/{:d}/inputchannel'.format(dev, pid), inputchannel)
@@ -351,6 +501,22 @@ class zhinst_demod_recorder(object):
 def get_scope_records(device, daq, scopeModule, num_records=1):
     """
     Obtain scope records from the device using an instance of the Scope Module.
+    
+    Parameters
+    ----------
+    device : str
+        Device ID
+    daq : ziPython.ziDAQServer
+        Instance of the ziDAQServer class
+    scopeModule : object
+        Instance of the Scope Module
+    num_records : int, optional
+        Number of records to acquire
+        
+    Returns
+    -------
+    dict
+        Dictionary containing scope records
     """
 
     # Tell the module to be ready to acquire data; reset the module's progress to 0.0.
