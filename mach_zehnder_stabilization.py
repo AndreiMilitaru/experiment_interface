@@ -18,8 +18,9 @@ from .mach_zehnder_utils.phase_calibration import (
 from .mach_zehnder_utils.mach_zehnder_lock import (
     set_demodulators, set_aux_limits, set_pid_params, set_setpoint, check_locks
 )
+from .mach_zehnder_utils.manager_interface import MZManagerInterface
 
-class MachZehnderManager:
+class MachZehnderManager(MZManagerInterface):
     def __init__(
         self,
         mdrec,
