@@ -11,7 +11,7 @@ class ConfigDialog(tk.Tk):
         # Default values
         self.default_ip = "10.21.217.17"
         self.default_device = "MFLI"
-        self.default_config = "./config/mach_zehnder/default_config.yaml"
+        self.default_config = "./config/mach_zehnder/"
         self.default_interval = "0.1"
         
         self._create_widgets()

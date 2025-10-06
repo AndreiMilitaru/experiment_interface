@@ -37,7 +37,7 @@ class MachZehnderManager(MZManagerInterface):
             lock_check_interval: Interval for lock monitoring thread
         """
         self._mdrec = mdrec
-        self._config_path = Path(config_path or "../config/mach_zehnder/default_config.yaml")
+        self._config_path = Path(config_path or "../config/mach_zehnder")
         self._lock_check_interval = lock_check_interval
         self._monitoring_active = False
         self._monitor_thread = None
@@ -53,9 +53,9 @@ class MachZehnderManager(MZManagerInterface):
         if load_latest_pid_config:
             self.load_latest_pid_config()
     
-    def _load_config(self):
+    def _load_config(self, config_name: Optional[str] = 'default_config.yaml'):
         """Load YAML configuration"""
-        with open(self._config_path, 'r') as f:
+        with open(self._config_path / config_name, 'r') as f:
             self._config = yaml.safe_load(f)
         self._device_id = self._config['device']['id']
     
