@@ -7,7 +7,7 @@ Description: Utilities for calibrating the phase signal at the Mach Zehnder outp
 
 import numpy as np
 from scipy.optimize import curve_fit
-from .mach_zehnder_lock import df2tc, toggle_locks
+from mach_zehnder_utils.mach_zehnder_lock import df2tc, toggle_locks
 
 detector_offset = 200e-3  # Volts
 

@@ -18,8 +18,8 @@ import matplotlib.pyplot as plt
 # Try to import hardware-dependent modules
 HARDWARE_AVAILABLE = False
 try:
-    from zhinst_utils.demodulation_recorder.demodulation_recorder import zhinst_demod_recorder
-    from visualization.control.mach_zehnder_stabilization import MachZehnderManager
+    from zhinst_utils.demodulation_recorder import zhinst_demod_recorder
+    from control.mach_zehnder_stabilization import MachZehnderManager
     HARDWARE_AVAILABLE = True
 except ImportError:
     print("Hardware modules not available. Running in dummy mode.")

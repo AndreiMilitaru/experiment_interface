@@ -367,3 +367,4 @@ testing_ZIAPI.ipynb
 /utils/.ipynb_checkpoints/set_axes-checkpoint.py
 zhinst_utils/.DS_Store
 .DS_Store
+*__pycache__*

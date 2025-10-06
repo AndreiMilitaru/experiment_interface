@@ -9,7 +9,7 @@ class ConfigDialog(tk.Tk):
         self.result = None
         
         # Default values
-        self.default_ip = "10.21.217.191"
+        self.default_ip = "10.21.217.17"
         self.default_device = "MFLI"
         self.default_config = "../config/mach_zehnder/default_config.yaml"
         self.default_interval = "0.1"
