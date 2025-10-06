@@ -525,7 +525,7 @@ class MZControlGUI(tk.Tk):
         """Fix calibration paths by making them relative to the config directory."""
         try:
             # Get the directory containing the config file
-            config_dir = os.path.dirname(config_path)
+            config_dir = os.path.dirname(os.path.abspath(config_path))
             
             # Load the config file
             with open(config_path, 'r') as f:
@@ -533,15 +533,19 @@ class MZControlGUI(tk.Tk):
             
             # Check if calibration_paths exist
             if 'calibration_paths' in config_data:
-                # Create calibrations directory if it doesn't exist
-                calibrations_dir = os.path.join(config_dir, 'calibrations')
+                # Create calibrations directory as a sibling to the config file
+                calibrations_dir = os.path.join(os.path.dirname(config_dir), 'calibrations')
                 os.makedirs(calibrations_dir, exist_ok=True)
                 
                 # Update the paths in memory for the manager to use
                 for key, rel_path in config_data['calibration_paths'].items():
-                    # Make the path absolute and properly joined
-                    abs_path = os.path.join(config_dir, rel_path)
+                    # Convert to proper OS-specific path and make it relative to config directory
+                    norm_path = os.path.normpath(rel_path)
+                    abs_path = os.path.join(os.path.dirname(config_dir), norm_path)
                     config_data['calibration_paths'][key] = abs_path
+                    
+                    # Ensure the directory for this calibration file exists
+                    os.makedirs(os.path.dirname(abs_path), exist_ok=True)
                     print(f"Updated calibration path '{key}': {abs_path}")
                 
                 # Save the updated config
