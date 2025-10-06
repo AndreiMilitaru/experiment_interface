@@ -59,8 +59,11 @@ class MachZehnderVisualizer:
         # Calculate visibility from parameters
         visibility = evaluate_visibility(data['parameters'])
         
+        # Format timestamp for display
+        ts = data["timestamp"].split("T")[0]  # Get just the date part
+        
         set_ax(ax, xlabel='Voltage (V)', ylabel='Probability Density', legend=True,
-               title=f'Range Calibration ({data["timestamp"]})\nVisibility: {visibility:.3f}') 
+               title=f'Range Calibration (Data from {ts})\nVisibility: {visibility:.3f}') 
         
         return fig, ax
     
@@ -97,8 +100,11 @@ class MachZehnderVisualizer:
                 markeredgewidth=0.5, alpha=0.7, markersize=4,
                 label='Measurement', zorder=2)
 
+        # Format timestamp for display
+        ts = data["timestamp"].split("T")[0]  # Get just the date part
+        
         set_ax(ax, xlabel=r'Phase (rad / $\pi$)', ylabel='Probability Density',
-               title=f'Lock Performance ({data["timestamp"]})', legend=True)
+               title=f'Lock Performance (Data from {ts})', legend=True)
         
         return fig, ax
     
@@ -108,7 +114,7 @@ class MachZehnderVisualizer:
         """Create a combined figure with both range calibration and lock performance."""
         fig = plt.figure(figsize=(3.14, 6), dpi=150)
         
-        # Create both axes
+        # Create both axes with more space for titles
         ax1 = fig.add_subplot(211)
         ax2 = fig.add_subplot(212)
         
@@ -116,7 +122,7 @@ class MachZehnderVisualizer:
         self.plot_range_calibration(timestamp=range_timestamp, ax=ax1)
         self.plot_lock_performance(timestamp=lock_timestamp, ax=ax2)
         
-        # Adjust spacing between subplots
-        plt.tight_layout()
+        # Adjust spacing between subplots to accommodate longer titles
+        plt.tight_layout(h_pad=2.0)
         
         return fig, [ax1, ax2]

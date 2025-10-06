@@ -302,6 +302,11 @@ class MZControlGUI(tk.Tk):
         plot_lock_btn.pack(side=tk.LEFT, padx=5)
         ToolTip(plot_lock_btn, "Display the latest lock performance data and fit")
         
+        plot_combined_btn = ttk.Button(vis_btn_frame, text="Plot Combined Analysis",
+                                    command=self._plot_combined_analysis)
+        plot_combined_btn.pack(side=tk.LEFT, padx=5)
+        ToolTip(plot_combined_btn, "Display both calibration and lock performance plots")
+
         # Auto-load latest results
         self._load_latest_results()
     
@@ -481,6 +486,15 @@ class MZControlGUI(tk.Tk):
             plt.show()
         except Exception as e:
             messagebox.showerror("Plot Error", f"Failed to plot lock performance: {str(e)}")
+    
+    def _plot_combined_analysis(self):
+        """Display combined analysis plots"""
+        try:
+            fig, _ = self.visualizer.plot_combined_analysis()
+            plt.show()
+        except Exception as e:
+            messagebox.showerror("Plot Error", f"Failed to plot combined analysis: {str(e)}")
+            print(f"Debug info - Error details: {str(e)}")  # Added debug info
 
 if __name__ == "__main__":
     try:

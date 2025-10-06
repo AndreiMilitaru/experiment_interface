@@ -1,12 +1,14 @@
 """
 Module to record demodulator time traces from Zurich Instruments lock-in amplifiers.
 The original version was previously written in the Photonics Laboratory of ETH Zurich
-by Andrei Militaru, and it has now been adapted and expanded upon.
+by Andrei Militaru, and it has now been adapted and expanded upon with help from GitHub Copilot.
 """
 
 from typing import Optional, Sequence
 import matplotlib.pyplot as plt
+from matplotlib.colorbar import Colorbar
 from .plot_styles import PlotStyle
+import matplotlib
 
 def set_colorbar(
     mappable,
@@ -18,45 +20,52 @@ def set_colorbar(
     label_position: Optional[str] = None,
     colorbar_position: Optional[str] = None,
     **kwargs
-) -> plt.colorbar.Colorbar:
-    """Set colorbar style and properties
-    
-    Args:
-        mappable: The image/plot to create colorbar for
-        ax: Matplotlib axes to attach colorbar to
-        style: PlotStyle object for visual properties
-        ticks: Specific colorbar tick positions
-        ticklabels: Labels for colorbar ticks
-        label: Colorbar label
-        label_position: Position of the colorbar label
-        colorbar_position: Position of colorbar ('right'/'left' or 'top'/'bottom')
-        **kwargs: Additional style parameters
-    """
+) -> Colorbar:
+    """Set colorbar style and properties with error handling and version checks."""
     if style is None:
         style = PlotStyle(**kwargs)
     else:
         for key, value in kwargs.items():
             setattr(style, key, value)
 
+    # Check matplotlib version for 'location' argument
+    mpl_version = tuple(map(int, matplotlib.__version__.split('.')[:2]))
+    location_supported = mpl_version >= (3, 4)
+
     # Set colorbar position and create it
     position = colorbar_position or style.cbar_position
-    clb = plt.colorbar(
-        mappable,
-        ax=ax,
-        orientation=style.cbar_orientation,
-        fraction=style.cbar_fraction,
-        pad=style.cbar_pad,
-        location=position 
-    )
+    try:
+        if location_supported:
+            clb = plt.colorbar(
+                mappable,
+                ax=ax,
+                orientation=style.cbar_orientation,
+                fraction=style.cbar_fraction,
+                pad=style.cbar_pad,
+                location=position 
+            )
+        else:
+            clb = plt.colorbar(
+                mappable,
+                ax=ax,
+                orientation=style.cbar_orientation,
+                fraction=style.cbar_fraction,
+                pad=style.cbar_pad
+            )
+    except Exception as e:
+        print(f"Error creating colorbar: {e}")
+        return None
     
     # Set label with position adjustment
     if label or style.cbar_label:
         position = label_position or style.cbar_label_position
-        if style.cbar_orientation == 'vertical':
-            clb.ax.yaxis.set_label_position(position)  # User specified position
-        else:
-            clb.ax.xaxis.set_label_position('top')
-        
+        try:
+            if style.cbar_orientation == 'vertical':
+                clb.ax.yaxis.set_label_position(position)
+            else:
+                clb.ax.xaxis.set_label_position('top')
+        except Exception as e:
+            print(f"Error setting colorbar label position: {e}")
         clb.set_label(
             label or style.cbar_label,
             fontsize=style.fs,
@@ -70,8 +79,8 @@ def set_colorbar(
         
     if ticklabels is not None:
         if ticklabels == '':
-            for label in clb.ax.get_yticklabels():
-                label.set_text('')
+            # Use set_ticklabels([]) to clear labels safely
+            clb.set_ticklabels([])
         else:
             clb.set_ticklabels(ticklabels, fontsize=style.fs_ticks)
     elif style.cbar_ticklabels is not None:
@@ -97,21 +106,10 @@ def set_ax(
     yticklabels: Optional[Sequence[str]] = None,
     **kwargs
 ) -> plt.Axes:
-    """Set plot style and axis properties
-    
-    Args:
-        ax: Matplotlib axes to style
-        style: PlotStyle object for visual properties
-        xticks: Specific x-axis tick positions
-        yticks: Specific y-axis tick positions
-        xticklabels: Labels for x-axis ticks
-        yticklabels: Labels for y-axis ticks
-        **kwargs: Additional style parameters
-    """
+    """Set plot style and axis properties with safer tick label handling."""
     if style is None:
         style = PlotStyle(**kwargs)
     else:
-        # Override style with any provided kwargs
         for key, value in kwargs.items():
             setattr(style, key, value)
 
@@ -140,9 +138,7 @@ def set_ax(
     
     if xticklabels is not None:
         if xticklabels == '':
-            # Clear all x tick labels
-            for label in ax.get_xticklabels():
-                label.set_text('')
+            ax.set_xticklabels([])  # Safer way to clear labels
         else:
             ax.set_xticklabels(xticklabels, fontsize=style.fs_ticks)
     else:
@@ -150,27 +146,31 @@ def set_ax(
     
     if yticklabels is not None:
         if yticklabels == '':
-            # Clear all y tick labels
-            for label in ax.get_yticklabels():
-                label.set_text('')
+            ax.set_yticklabels([])  # Safer way to clear labels
         else:
             ax.set_yticklabels(yticklabels, fontsize=style.fs_ticks)
     else:
         ax.tick_params(axis='y', labelsize=style.fs_ticks)
     
     if style.legend:
-        ax.legend(fontsize=style.fs_legend)
+        try:
+            ax.legend(fontsize=style.fs_legend)
+        except Exception as e:
+            print(f"Error setting legend: {e}")
     if style.axis is not None:
         ax.axis(style.axis)
     if style.colorbar:
-        clb = set_colorbar(ax.get_images()[0], ax, style)
+        try:
+            clb = set_colorbar(ax.get_images()[0], ax, style)
+        except Exception as e:
+            print(f"Error adding colorbar: {e}")
     if style.grid:
         ax.grid()
     ax.tick_params(which='both', direction=style.tick_direction, bottom=True,
                    top=True, left=True, right=True)
     if style.grid:
         try:
-            ax.tick_params(grid_alpha=style.grid_alpha)
-        except:
-            pass
+            ax.tick_params(grid_alpha=getattr(style, 'grid_alpha', 0.3))
+        except Exception as e:
+            print(f"Error setting grid alpha: {e}")
     return ax
