@@ -522,10 +522,14 @@ class MZControlGUI(tk.Tk):
             print(f"Debug info - Error details: {str(e)}")  # Added debug info
 
     def _fix_calibration_paths(self, config_path):
-        """Fix calibration paths by making them relative to the config directory."""
+        """Fix calibration paths by making them relative to the project root."""
         try:
-            # Get the directory containing the config file
-            config_dir = os.path.dirname(os.path.abspath(config_path))
+            # Get the project root directory (two levels up from the config file)
+            project_root = os.path.dirname(os.path.dirname(os.path.dirname(config_path)))
+            
+            # Create calibrations directory in project root
+            calibrations_dir = os.path.join(project_root, 'calibrations')
+            os.makedirs(calibrations_dir, exist_ok=True)
             
             # Load the config file
             with open(config_path, 'r') as f:
@@ -533,20 +537,15 @@ class MZControlGUI(tk.Tk):
             
             # Check if calibration_paths exist
             if 'calibration_paths' in config_data:
-                # Create calibrations directory as a sibling to the config file
-                calibrations_dir = os.path.join(os.path.dirname(config_dir), 'calibrations')
-                os.makedirs(calibrations_dir, exist_ok=True)
-                
                 # Update the paths in memory for the manager to use
                 for key, rel_path in config_data['calibration_paths'].items():
-                    # Convert to proper OS-specific path and make it relative to config directory
-                    norm_path = os.path.normpath(rel_path)
-                    abs_path = os.path.join(os.path.dirname(config_dir), norm_path)
-                    config_data['calibration_paths'][key] = abs_path
+                    # Make sure the path is relative to calibrations directory
+                    file_path = os.path.join(calibrations_dir, os.path.basename(rel_path))
+                    config_data['calibration_paths'][key] = file_path
                     
-                    # Ensure the directory for this calibration file exists
-                    os.makedirs(os.path.dirname(abs_path), exist_ok=True)
-                    print(f"Updated calibration path '{key}': {abs_path}")
+                    # Ensure the calibrations directory exists
+                    os.makedirs(calibrations_dir, exist_ok=True)
+                    print(f"Updated calibration path '{key}': {file_path}")
                 
                 # Save the updated config
                 with open(config_path, 'w') as f:
@@ -564,4 +563,5 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Error starting application: {e}")
         import traceback
+        traceback.print_exc()
         traceback.print_exc()
