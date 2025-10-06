@@ -36,6 +36,7 @@ class MachZehnderManager(MZManagerInterface):
             load_latest_pid_config: Whether to load most recent PID config
             lock_check_interval: Interval for lock monitoring thread
         """
+        print("Initializing manager...")
         self._mdrec = mdrec
         self._config_path = Path(config_path or "../config/mach_zehnder")
         self._lock_check_interval = lock_check_interval
@@ -48,27 +49,31 @@ class MachZehnderManager(MZManagerInterface):
         # Initialize demodulators
         self._setup_demodulators()
         self.set_aux_limits()
-        self.set_pid_params()  # Add this line
+        self.set_pid_params() 
         
         if load_latest_pid_config:
             self.load_latest_pid_config()
     
     def _load_config(self, config_name: Optional[str] = 'default_config.yaml'):
         """Load YAML configuration"""
+        print(f"Loading configuration from {self._config_path / config_name}")
         with open(self._config_path / config_name, 'r') as f:
-            print(f"Loading configuration from {self._config_path / config_name}")
             self._config = yaml.safe_load(f)
         self._device_id = self._config['device']['id']
+        print("Loading complete.")
     
     def _setup_calibration_folders(self):
         """Create folders for storing calibration data"""
+        print("Creating calibration folders if not already existing...")
         calib_base = self._config_path / "calibrations"
         calib_base.mkdir(exist_ok=True)
         for calib_type in ['range', 'visibility', 'lock_precision', 'pid_config']:
             (calib_base / calib_type).mkdir(exist_ok=True)
+        print("Done.")
     
     def _setup_demodulators(self):
         """Set up demodulators based on config file"""
+        print("Setting up demodulators...")
         demod_config = self._config.get('demodulators', {})
         if not demod_config:
             raise ValueError("No demodulator configuration found in config file")
@@ -84,6 +89,7 @@ class MachZehnderManager(MZManagerInterface):
             rate=main_config['rate'],
             bandwidth=main_config['bandwidth']
         )
+        print("Done.")
         
         self._demod_config = demod_config
     
@@ -104,7 +110,6 @@ class MachZehnderManager(MZManagerInterface):
             'edges': edges,
             'timestamp': timestamp
         }
-        
         path = self._config_path / self._config['calibration_paths']['range']
         self._save_calibration_data(path, data)
         return data
@@ -213,12 +218,11 @@ class MachZehnderManager(MZManagerInterface):
         clean_timestamp = timestamp.replace(':', '-').replace('.', '-')
         return base_path / f"data_{clean_timestamp}.npy"
 
-    @staticmethod
-    def _save_calibration_data(path: Path, data: Dict):
+    def _save_calibration_data(self, path: Path, data: Dict):
         """Save calibration data with timestamp in filename"""
         timestamp = data.get('timestamp', datetime.now().isoformat())
-        filepath = MachZehnderManager._create_timestamped_filename(path, timestamp)
-        np.save(str(filepath), data)
+        filepath = self._create_timestamped_filename(path, timestamp)
+        np.save(str(filepath), data, allow_pickle=True)
 
     def _load_latest_calibration(self, calib_type: str) -> Optional[Dict]:
         """Load most recent calibration data"""
@@ -261,15 +265,14 @@ class MachZehnderManager(MZManagerInterface):
         """Configure PID parameters for both piezo and laser channels"""
         piezo_config = self._config['pid']['piezo']
         laser_config = self._config['pid']['laser']
-        
         set_pid_params(
             self._mdrec,
             dev=self._device_id,
             piezo_params=piezo_config['params'],
             laser_params=laser_config['params'],
-            piezo_aux=piezo_config['pid_number'],
-            laser_aux=laser_config['pid_number'],
-            demodulator=self._config['demodulators']['main']['demodulator'],
+            piezo_pid=piezo_config['pid_number'],
+            laser_pid=laser_config['pid_number'],
+            demodulator=self._config['demodulators']['input']['demodulator'],
             piezo_out=piezo_config['aux'],
             laser_out=laser_config['aux'],
             piezo_center=piezo_config['center'],

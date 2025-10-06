@@ -148,14 +148,6 @@ class MZControlGUI(tk.Tk):
         config['config_path'] = os.path.normpath(config['config_path'])
         
         print(f"Resolved config path: {config['config_path']}")
-        if not os.path.isfile(config['config_path']):
-            print(f"Config file does not exist at: {config['config_path']}")
-            messagebox.showerror("Config Error", f"Config file not found:\n{config['config_path']}")
-            self.destroy()
-            return
-
-        # Fix calibration paths before initializing manager
-        self._fix_calibration_paths(config['config_path'])
 
         # Initialize manager based on mode
         try:
@@ -521,50 +513,6 @@ class MZControlGUI(tk.Tk):
         except Exception as e:
             messagebox.showerror("Plot Error", f"Failed to plot combined analysis: {str(e)}")
             print(f"Debug info - Error details: {str(e)}")  # Added debug info
-
-    def _fix_calibration_paths(self, config_path):
-        """Fix calibration paths by making them relative to the project root."""
-        try:
-            # Get the project root directory (parent of config directory)
-            project_root = os.path.dirname(os.path.dirname(os.path.dirname(config_path)))
-            
-            # Create calibrations directory at project root level
-            calibrations_dir = os.path.join(project_root, 'calibrations')
-            
-            # Ensure the directory exists
-            os.makedirs(calibrations_dir, exist_ok=True)
-            print(f"Created/verified calibrations directory at: {calibrations_dir}")
-            
-            # Load and modify the config file
-            with open(config_path, 'r') as f:
-                config_data = yaml.safe_load(f) or {}
-            
-            if 'calibration_paths' in config_data:
-                modified_paths = {}
-                for key, path in config_data['calibration_paths'].items():
-                    # Create a simple filename if none exists
-                    if not path:
-                        path = f"{key}_calibration.yaml"
-                    
-                    # Use just the filename, put it in calibrations directory
-                    filename = os.path.basename(path)
-                    new_path = os.path.join(calibrations_dir, filename)
-                    modified_paths[key] = new_path
-                    print(f"Mapped calibration path '{key}': {new_path}")
-                
-                # Update the config with new paths
-                config_data['calibration_paths'] = modified_paths
-                
-                # Save the modified config
-                with open(config_path, 'w') as f:
-                    yaml.dump(config_data, f, default_flow_style=False)
-                
-                print(f"Updated config file with new calibration paths")
-                
-        except Exception as e:
-            print(f"Warning: Could not update calibration paths: {e}")
-            import traceback
-            traceback.print_exc()
 
 if __name__ == "__main__":
     try:

@@ -11,7 +11,8 @@ from mach_zehnder_utils.mach_zehnder_lock import df2tc, toggle_locks
 
 detector_offset = 200e-3  # Volts
 
-def drive_phase(mdrec, dev='dev30794', drive_demodulator=1, drive_oscillator=1, drive_freq=100, drive_amp=1, trace_duration=1, reset_pids=False):
+def drive_phase(mdrec, dev='dev30794', drive_demodulator=1, drive_oscillator=1, drive_freq=100, 
+                drive_amp=1, trace_duration=1, reset_pids=False, rate=53.57e3):
     """
     Drive the phase of the interferometer and collect demodulated timetraces.
     
@@ -37,12 +38,14 @@ def drive_phase(mdrec, dev='dev30794', drive_demodulator=1, drive_oscillator=1, 
     mdrec.lock_in.set('/{:s}/demods/{:d}/oscselect'.format(dev, drive_demodulator), drive_oscillator)
     mdrec.lock_in.set('/{:s}/demods/{:d}/adcselect'.format(dev, drive_demodulator), 174)
     mdrec.lock_in.set('/{:s}/demods/{:d}/timeconstant'.format(dev, drive_demodulator), df2tc(drive_freq*100))
+    mdrec.lock_in.set('/{:s}/demods/{:d}/rate'.format(dev, drive_demodulator), rate)
 
     # Activating the phase drive
     mdrec.lock_in.set('/{:s}/auxouts/0/offset'.format(dev), 2.5)
+    mdrec.lock_in.set('/{:s}/auxouts/0/demodselect'.format(dev), drive_demodulator)
     mdrec.lock_in.set('/{:s}/auxouts/0/outputselect'.format(dev), 0)
     mdrec.lock_in.set('/{:s}/auxouts/0/preoffset'.format(dev), 0.)
-    mdrec.lock_in.set('/{:s}/auxouts/0/scale'.format(dev), 1)
+    mdrec.lock_in.set('/{:s}/auxouts/0/scale'.format(dev), drive_amp)
 
     # Collecting demodulated timetrace
     dat = mdrec.record_timtrace(T=trace_duration)
