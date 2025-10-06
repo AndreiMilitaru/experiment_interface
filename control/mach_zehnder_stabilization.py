@@ -56,6 +56,7 @@ class MachZehnderManager(MZManagerInterface):
     def _load_config(self, config_name: Optional[str] = 'default_config.yaml'):
         """Load YAML configuration"""
         with open(self._config_path / config_name, 'r') as f:
+            print(f"Loading configuration from {self._config_path / config_name}")
             self._config = yaml.safe_load(f)
         self._device_id = self._config['device']['id']
     
