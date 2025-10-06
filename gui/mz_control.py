@@ -9,6 +9,7 @@ PID control, range calibration, visibility measurement, and lock monitoring.
 import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime
+import yaml  # Add this import
 from mach_zehnder_utils.dummy_manager import DummyMZManager
 from gui.config_dialog import ConfigDialog
 from visualization.mach_zehnder_visualizer import MachZehnderVisualizer 
@@ -150,6 +151,9 @@ class MZControlGUI(tk.Tk):
             messagebox.showerror("Config Error", f"Config file not found:\n{config['config_path']}")
             self.destroy()
             return
+            
+        # New function to fix calibration paths in the YAML file
+        self._fix_calibration_paths(config['config_path'])
         # --- End improved config path fix ---
 
         # Initialize manager based on mode
@@ -516,6 +520,38 @@ class MZControlGUI(tk.Tk):
         except Exception as e:
             messagebox.showerror("Plot Error", f"Failed to plot combined analysis: {str(e)}")
             print(f"Debug info - Error details: {str(e)}")  # Added debug info
+
+    def _fix_calibration_paths(self, config_path):
+        """Fix calibration paths by making them relative to the config directory."""
+        try:
+            # Get the directory containing the config file
+            config_dir = os.path.dirname(config_path)
+            
+            # Load the config file
+            with open(config_path, 'r') as f:
+                config_data = yaml.safe_load(f)
+            
+            # Check if calibration_paths exist
+            if 'calibration_paths' in config_data:
+                # Create calibrations directory if it doesn't exist
+                calibrations_dir = os.path.join(config_dir, 'calibrations')
+                os.makedirs(calibrations_dir, exist_ok=True)
+                
+                # Update the paths in memory for the manager to use
+                for key, rel_path in config_data['calibration_paths'].items():
+                    # Make the path absolute and properly joined
+                    abs_path = os.path.join(config_dir, rel_path)
+                    config_data['calibration_paths'][key] = abs_path
+                    print(f"Updated calibration path '{key}': {abs_path}")
+                
+                # Save the updated config
+                with open(config_path, 'w') as f:
+                    yaml.dump(config_data, f, default_flow_style=False)
+                    
+                print(f"Updated calibration paths in {config_path}")
+        except Exception as e:
+            print(f"Warning: Could not update calibration paths: {e}")
+            # Continue with original paths, hoping the manager handles them correctly
 
 if __name__ == "__main__":
     try:
