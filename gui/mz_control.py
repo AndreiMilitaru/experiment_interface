@@ -133,28 +133,29 @@ class MZControlGUI(tk.Tk):
                 'config_path': ''
             }
 
-        # --- Improved config path fix ---
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        default_config_rel = os.path.join('config', 'mach_zehnder', 'default_config.yaml')
-        default_config_abs = os.path.normpath(os.path.join(script_dir, '..', default_config_rel))
-
-        # If config_path is empty, use default absolute path
+        # Get the project root directory (parent of gui directory)
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        
+        # Resolve config path
         if not config.get('config_path'):
-            config['config_path'] = default_config_abs
+            # Use default config path relative to project root
+            config['config_path'] = os.path.join(project_root, 'config', 'mach_zehnder', 'default_config.yaml')
         elif not os.path.isabs(config['config_path']):
-            # If config_path is relative, resolve relative to project root
-            config['config_path'] = os.path.normpath(os.path.join(script_dir, '..', config['config_path']))
-
+            # If path is relative, make it relative to project root
+            config['config_path'] = os.path.join(project_root, config['config_path'])
+        
+        # Normalize the path for the current OS
+        config['config_path'] = os.path.normpath(config['config_path'])
+        
         print(f"Resolved config path: {config['config_path']}")
         if not os.path.isfile(config['config_path']):
             print(f"Config file does not exist at: {config['config_path']}")
             messagebox.showerror("Config Error", f"Config file not found:\n{config['config_path']}")
             self.destroy()
             return
-            
-        # New function to fix calibration paths in the YAML file
+
+        # Fix calibration paths before initializing manager
         self._fix_calibration_paths(config['config_path'])
-        # --- End improved config path fix ---
 
         # Initialize manager based on mode
         try:
@@ -524,37 +525,46 @@ class MZControlGUI(tk.Tk):
     def _fix_calibration_paths(self, config_path):
         """Fix calibration paths by making them relative to the project root."""
         try:
-            # Get the project root directory (two levels up from the config file)
+            # Get the project root directory (parent of config directory)
             project_root = os.path.dirname(os.path.dirname(os.path.dirname(config_path)))
             
-            # Create calibrations directory in project root
+            # Create calibrations directory at project root level
             calibrations_dir = os.path.join(project_root, 'calibrations')
+            
+            # Ensure the directory exists
             os.makedirs(calibrations_dir, exist_ok=True)
+            print(f"Created/verified calibrations directory at: {calibrations_dir}")
             
-            # Load the config file
+            # Load and modify the config file
             with open(config_path, 'r') as f:
-                config_data = yaml.safe_load(f)
+                config_data = yaml.safe_load(f) or {}
             
-            # Check if calibration_paths exist
             if 'calibration_paths' in config_data:
-                # Update the paths in memory for the manager to use
-                for key, rel_path in config_data['calibration_paths'].items():
-                    # Make sure the path is relative to calibrations directory
-                    file_path = os.path.join(calibrations_dir, os.path.basename(rel_path))
-                    config_data['calibration_paths'][key] = file_path
+                modified_paths = {}
+                for key, path in config_data['calibration_paths'].items():
+                    # Create a simple filename if none exists
+                    if not path:
+                        path = f"{key}_calibration.yaml"
                     
-                    # Ensure the calibrations directory exists
-                    os.makedirs(calibrations_dir, exist_ok=True)
-                    print(f"Updated calibration path '{key}': {file_path}")
+                    # Use just the filename, put it in calibrations directory
+                    filename = os.path.basename(path)
+                    new_path = os.path.join(calibrations_dir, filename)
+                    modified_paths[key] = new_path
+                    print(f"Mapped calibration path '{key}': {new_path}")
                 
-                # Save the updated config
+                # Update the config with new paths
+                config_data['calibration_paths'] = modified_paths
+                
+                # Save the modified config
                 with open(config_path, 'w') as f:
                     yaml.dump(config_data, f, default_flow_style=False)
-                    
-                print(f"Updated calibration paths in {config_path}")
+                
+                print(f"Updated config file with new calibration paths")
+                
         except Exception as e:
             print(f"Warning: Could not update calibration paths: {e}")
-            # Continue with original paths, hoping the manager handles them correctly
+            import traceback
+            traceback.print_exc()
 
 if __name__ == "__main__":
     try:
