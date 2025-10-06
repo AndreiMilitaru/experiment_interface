@@ -3,7 +3,7 @@ device:
   detector_offset: 0.2  # 200mV
 
 demodulators:
-  main:
+  input:
     oscillator: 0
     demodulator: 1
     order: 1
