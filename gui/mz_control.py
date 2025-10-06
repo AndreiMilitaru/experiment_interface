@@ -14,6 +14,7 @@ from gui.config_dialog import ConfigDialog
 from visualization.mach_zehnder_visualizer import MachZehnderVisualizer 
 from control.mach_zehnder_stabilization import MachZehnderManager
 import matplotlib.pyplot as plt
+import os
 
 # Try to import hardware-dependent modules
 HARDWARE_AVAILABLE = False
@@ -123,7 +124,6 @@ class MZControlGUI(tk.Tk):
             print("Configuration successful, proceeding with initialization")
         else:
             print("No valid configuration from dialog, using dummy mode fallback")
-            # Provide default dummy configuration
             config = {
                 'dummy_mode': True,
                 'interval': 1.0,  # Default interval
@@ -131,7 +131,22 @@ class MZControlGUI(tk.Tk):
                 'device_type': '',
                 'config_path': ''
             }
-        
+
+        # --- Insert config path fix here ---
+        # If config_path is empty or relative, construct absolute path
+        if not config.get('config_path'):
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            config['config_path'] = os.path.normpath(
+                os.path.join(script_dir, '..', 'config', 'mach_zehnder', 'default_config.yaml')
+            )
+        elif not os.path.isabs(config['config_path']):
+            # If config_path is relative, make it absolute
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            config['config_path'] = os.path.normpath(
+                os.path.join(script_dir, '..', config['config_path'])
+            )
+        # --- End config path fix ---
+
         # Initialize manager based on mode
         try:
             if not config['dummy_mode'] and HARDWARE_AVAILABLE: 
@@ -161,10 +176,10 @@ class MZControlGUI(tk.Tk):
             self.destroy()
             return
         
-        # Initialize visualizer with config path - use the one from config
-        config_path = config.get('config_path') or "../config/mach_zehnder"
+        # Initialize visualizer with config path
+        config_path = config.get('config_path')
         self.visualizer = MachZehnderVisualizer(config_path)
-        
+
         self._create_widgets()
         self._center_window()
         
