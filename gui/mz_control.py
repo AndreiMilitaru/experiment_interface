@@ -132,20 +132,25 @@ class MZControlGUI(tk.Tk):
                 'config_path': ''
             }
 
-        # --- Insert config path fix here ---
-        # If config_path is empty or relative, construct absolute path
+        # --- Improved config path fix ---
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        default_config_rel = os.path.join('config', 'mach_zehnder', 'default_config.yaml')
+        default_config_abs = os.path.normpath(os.path.join(script_dir, '..', default_config_rel))
+
+        # If config_path is empty, use default absolute path
         if not config.get('config_path'):
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            config['config_path'] = os.path.normpath(
-                os.path.join(script_dir, '..', 'config', 'mach_zehnder', 'default_config.yaml')
-            )
+            config['config_path'] = default_config_abs
         elif not os.path.isabs(config['config_path']):
-            # If config_path is relative, make it absolute
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            config['config_path'] = os.path.normpath(
-                os.path.join(script_dir, '..', config['config_path'])
-            )
-        # --- End config path fix ---
+            # If config_path is relative, resolve relative to project root
+            config['config_path'] = os.path.normpath(os.path.join(script_dir, '..', config['config_path']))
+
+        print(f"Resolved config path: {config['config_path']}")
+        if not os.path.isfile(config['config_path']):
+            print(f"Config file does not exist at: {config['config_path']}")
+            messagebox.showerror("Config Error", f"Config file not found:\n{config['config_path']}")
+            self.destroy()
+            return
+        # --- End improved config path fix ---
 
         # Initialize manager based on mode
         try:
