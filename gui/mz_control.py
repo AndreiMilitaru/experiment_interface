@@ -12,13 +12,14 @@ from datetime import datetime
 from mach_zehnder_utils.dummy_manager import DummyMZManager
 from gui.config_dialog import ConfigDialog
 from visualization.mach_zehnder_visualizer import MachZehnderVisualizer 
+from control.mach_zehnder_stabilization import MachZehnderManager
 import matplotlib.pyplot as plt
 
 # Try to import hardware-dependent modules
 HARDWARE_AVAILABLE = False
 try:
     from zhinst_utils.demodulation_recorder.demodulation_recorder import zhinst_demod_recorder
-    from mach_zehnder_stabilization import MachZehnderManager
+    from visualization.control.mach_zehnder_stabilization import MachZehnderManager
     HARDWARE_AVAILABLE = True
 except ImportError:
     print("Hardware modules not available. Running in dummy mode.")
