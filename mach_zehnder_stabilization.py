@@ -170,9 +170,10 @@ class MachZehnderManager(MZManagerInterface):
             range_parameters = range_calib['parameters']
         
         visibility = evaluate_visibility(range_parameters)
+        timestamp = datetime.now().isoformat()
         data = {
             'visibility': visibility,
-            'timestamp': datetime.now().isoformat()
+            'timestamp': timestamp
         }
         
         path = self._config_path / self._config['calibration_paths']['visibility']
@@ -205,16 +206,33 @@ class MachZehnderManager(MZManagerInterface):
         return data
     
     @staticmethod
+    def _create_timestamped_filename(base_path: Path, timestamp: str) -> Path:
+        """Create a filename with timestamp"""
+        # Convert timestamp to a filename-friendly format
+        clean_timestamp = timestamp.replace(':', '-').replace('.', '-')
+        return base_path / f"data_{clean_timestamp}.npy"
+
+    @staticmethod
     def _save_calibration_data(path: Path, data: Dict):
-        """Save calibration data with timestamp"""
-        np.save(str(path), data)
-    
+        """Save calibration data with timestamp in filename"""
+        timestamp = data.get('timestamp', datetime.now().isoformat())
+        filepath = MachZehnderManager._create_timestamped_filename(path, timestamp)
+        np.save(str(filepath), data)
+
     def _load_latest_calibration(self, calib_type: str) -> Optional[Dict]:
         """Load most recent calibration data"""
         path = self._config_path / self._config['calibration_paths'][calib_type]
         if not path.exists():
             return None
-        return np.load(str(path), allow_pickle=True).item()
+        
+        # Find all calibration files
+        calib_files = list(path.glob("data_*.npy"))
+        if not calib_files:
+            return None
+            
+        # Sort by modification time and get the most recent
+        latest_file = max(calib_files, key=lambda x: x.stat().st_mtime)
+        return np.load(str(latest_file), allow_pickle=True).item()
     
     @property
     def latest_lock_quality(self) -> Optional[float]:

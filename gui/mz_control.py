@@ -9,9 +9,10 @@ PID control, range calibration, visibility measurement, and lock monitoring.
 import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime
-import sys  # Import sys to check the platform
 from mach_zehnder_utils.dummy_manager import DummyMZManager
 from gui.config_dialog import ConfigDialog
+from visualization.mach_zehnder_visualizer import MachZehnderVisualizer 
+import matplotlib.pyplot as plt
 
 # Try to import hardware-dependent modules
 HARDWARE_AVAILABLE = False
@@ -70,7 +71,7 @@ class ToolTip:
         label = tk.Label(self.tooltip_window, text=self.text,
                         background="#ffffe0", foreground="black",
                         relief="solid", borderwidth=1,
-                        font=("Arial", 9))
+                        font=("Arial", 11))
         label.pack()
     
     def hide_tooltip(self):
@@ -81,15 +82,14 @@ class ToolTip:
 class MZControlGUI(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Mach-Zehnder Control")
+        self.title("Mach-Zehnder Phase Control")
         
         # Hide main window initially
         self.withdraw()
         
-        self._configure_styles()
-        
         # Initialize manager to None first
         self.manager = None
+        self.visualizer = None  # Will be initialized in _check_config_and_continue
         
         # Get configuration
         config_dialog = ConfigDialog()
@@ -160,6 +160,10 @@ class MZControlGUI(tk.Tk):
             self.destroy()
             return
         
+        # Initialize visualizer with config path - use the one from config
+        config_path = config.get('config_path') or "../config/mach_zehnder"
+        self.visualizer = MachZehnderVisualizer(config_path)
+        
         self._create_widgets()
         self._center_window()
         
@@ -167,46 +171,6 @@ class MZControlGUI(tk.Tk):
         self.deiconify()
         self.lift()
         self.focus_force()
-
-    def _configure_styles(self):
-        # Apply custom styles only on macOS to avoid affecting Windows' native look
-        if sys.platform != 'darwin':
-            return
-
-        style = ttk.Style()
-        
-        available_themes = style.theme_names()
-        if 'aqua' in available_themes:
-            style.theme_use('aqua')
-        elif 'clam' in available_themes:
-            style.theme_use('clam')
-        
-        # Configure Button style to fix height warnings
-        style.configure('TButton', 
-                       anchor='center',
-                       padding=(6, 2))
-        
-        # Configure ComboBox style
-        style.configure('TCombobox',
-                       fieldbackground='white',
-                       background='white',
-                       foreground='black',
-                       selectbackground='#0078d4',
-                       selectforeground='white')
-        
-        # Configure Label style
-        style.configure('TLabel',
-                       background=self.cget('bg'),
-                       foreground='black')
-        
-        # Configure LabelFrame style
-        style.configure('TLabelframe',
-                       background=self.cget('bg'),
-                       foreground='black')
-        
-        style.configure('TLabelframe.Label',
-                       background=self.cget('bg'),
-                       foreground='black')
 
     def _create_widgets(self):
         # Range Calibration Frame (now includes visibility)
@@ -294,16 +258,49 @@ class MZControlGUI(tk.Tk):
         auto_sp_btn.pack(side=tk.LEFT, padx=2)
         ToolTip(auto_sp_btn, "Automatically set setpoint to the middle value\nbetween Vmin and Vmax from range calibration")
         
+        # Create a frame for checkboxes to place them side by side
+        check_frame = ttk.Frame(ctrl_frame)
+        check_frame.pack(pady=5)
+        
+        # Lock enable control
+        self.lock_var = tk.BooleanVar()
+        self.lock_check = ttk.Checkbutton(
+            check_frame,  # Changed parent to check_frame
+            text="Enable Lock",
+            variable=self.lock_var,
+            command=self._toggle_lock
+        )
+        self.lock_check.pack(side=tk.LEFT, padx=5)  # Added side and padx
+        ToolTip(self.lock_check, "Enable/disable the PID lock\nWhen disabled, the phase drifts freely.")
+        
         # Monitoring control
         self.monitor_var = tk.BooleanVar()
         self.monitor_check = ttk.Checkbutton(
-            ctrl_frame, 
+            check_frame,  # Changed parent to check_frame
             text="Monitor Locks",
             variable=self.monitor_var,
             command=self._toggle_monitoring
         )
-        self.monitor_check.pack(pady=5)
+        self.monitor_check.pack(side=tk.LEFT, padx=5)  # Added side and padx
         ToolTip(self.monitor_check, "Enable/disable continuous monitoring of phase locks\nWhen enabled, the system will automatically check and maintain lock stability")
+        
+        # Add Visualization Frame
+        vis_frame = ttk.LabelFrame(self, text="Visualization")
+        vis_frame.grid(row=2, column=0, columnspan=2, padx=10, pady=5, sticky="nsew")
+        
+        # Create button frame for visualization
+        vis_btn_frame = ttk.Frame(vis_frame)
+        vis_btn_frame.pack(pady=5)
+        
+        plot_range_btn = ttk.Button(vis_btn_frame, text="Plot Range Calibration",
+                                  command=self._plot_range_calibration)
+        plot_range_btn.pack(side=tk.LEFT, padx=5)
+        ToolTip(plot_range_btn, "Display the latest range calibration data and fit")
+        
+        plot_lock_btn = ttk.Button(vis_btn_frame, text="Plot Lock Performance",
+                                 command=self._plot_lock_performance)
+        plot_lock_btn.pack(side=tk.LEFT, padx=5)
+        ToolTip(plot_lock_btn, "Display the latest lock performance data and fit")
         
         # Auto-load latest results
         self._load_latest_results()
@@ -366,7 +363,7 @@ class MZControlGUI(tk.Tk):
             self.manager.load_latest_pid_config()
     
     def _range_calibration(self):
-        if messagebox.askyesno("Confirm", "Run range calibration?"):
+        if messagebox.askyesno("Confirm", "Run range calibration? This will temporarily disable the locks\nand drive the piezo."):
             result = self.manager.perform_range_calibration()
             if result:
                 # Extract vmin and vmax from par array (indices 1 and 2)
@@ -413,6 +410,17 @@ class MZControlGUI(tk.Tk):
         except ValueError:
             self.sp_var.set(str(self.manager.setpoint))
     
+    def _toggle_lock(self):
+        """Toggle the PID lock on/off"""
+        try:
+            if self.lock_var.get():
+                self.manager.enable_lock()
+            else:
+                self.manager.disable_lock()
+        except AttributeError:
+            messagebox.showwarning("Feature Unavailable", "Lock control not available with current manager.")
+            self.lock_var.set(False)
+    
     def _toggle_monitoring(self):
         if self.monitor_var.get():
             self.manager.start_monitoring()
@@ -457,6 +465,22 @@ class MZControlGUI(tk.Tk):
                 messagebox.showwarning("Feature Unavailable", "Auto setpoint feature not available with current manager.")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to auto-set setpoint: {str(e)}")
+    
+    def _plot_range_calibration(self):
+        """Display range calibration plot"""
+        try:
+            fig, _ = self.visualizer.plot_range_calibration()
+            plt.show()
+        except Exception as e:
+            messagebox.showerror("Plot Error", f"Failed to plot range calibration: {str(e)}")
+    
+    def _plot_lock_performance(self):
+        """Display lock performance plot"""
+        try:
+            fig, _ = self.visualizer.plot_lock_performance()
+            plt.show()
+        except Exception as e:
+            messagebox.showerror("Plot Error", f"Failed to plot lock performance: {str(e)}")
 
 if __name__ == "__main__":
     try:
