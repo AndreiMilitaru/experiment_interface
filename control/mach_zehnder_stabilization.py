@@ -13,7 +13,7 @@ from typing import Optional, Dict
 import threading
 import time
 from mach_zehnder_utils.phase_calibration import (
-    calibrate_range, evaluate_visibility, evaluate_lock_precision
+    calibrate_range, evaluate_visibility, evaluate_lock_precision, toggle_locks
 )
 from mach_zehnder_utils.mach_zehnder_lock import (
     set_demodulators, set_aux_limits, set_pid_params, set_setpoint, check_locks
@@ -70,7 +70,7 @@ class MachZehnderManager(MZManagerInterface):
         for calib_type in ['range', 'visibility', 'lock_precision', 'pid_config']:
             (calib_base / calib_type).mkdir(exist_ok=True)
         print("Done.")
-    
+
     def _setup_demodulators(self):
         """Set up demodulators based on config file"""
         print("Setting up demodulators...")
@@ -93,6 +93,9 @@ class MachZehnderManager(MZManagerInterface):
         
         self._demod_config = demod_config
     
+    def toggle_locks(self, value: bool):
+        toggle_locks(self._mdrec, value, dev=self._device_id)
+
     def perform_range_calibration(self) -> Dict:
         """Perform range calibration and save results"""
 

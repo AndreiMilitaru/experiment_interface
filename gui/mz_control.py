@@ -437,9 +437,9 @@ class MZControlGUI(tk.Tk):
         """Toggle the PID lock on/off"""
         try:
             if self.lock_var.get():
-                self.manager.enable_lock()
+                self.manager.toggle_locks(True)
             else:
-                self.manager.disable_lock()
+                self.manager.toggle_locks(False)
         except AttributeError:
             messagebox.showwarning("Feature Unavailable", "Lock control not available with current manager.")
             self.lock_var.set(False)
