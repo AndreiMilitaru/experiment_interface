@@ -9,7 +9,7 @@ import numpy as np
 from scipy.optimize import curve_fit
 from mach_zehnder_utils.mach_zehnder_lock import df2tc, toggle_locks
 
-detector_offset = 200e-3  # Volts
+detector_offset = 20e-3  # Volts
 
 def drive_phase(mdrec, dev='dev30794', drive_demodulator=1, drive_oscillator=1, drive_freq=100, 
                 drive_amp=1, trace_duration=1, reset_pids=False, rate=53.57e3):
@@ -76,7 +76,6 @@ def calibrate_range(mdrec, dev='dev30794', **kwargs):
     trace = drive_phase(mdrec, dev=dev, **kwargs)
     vmin, vmax = np.min(trace), np.max(trace)
     hist, bin_edges = np.histogram(trace, bins=200, density=True, range=(vmin, vmax))
-    vmin, vmax = np.min(trace), np.max(trace)
     guess = [np.min(hist[1:-2])*(vmax-vmin)/2, vmin, vmax]
     par, cov = curve_fit(unlock_model, bin_edges[1:-3], hist[1:-2], guess)
     return par, cov, hist, bin_edges

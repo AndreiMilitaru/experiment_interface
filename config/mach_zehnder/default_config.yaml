@@ -25,9 +25,8 @@ demodulators:
     drive_oscillator: 1
     rate: 53.57e3
     trace_duration: 1
-    reset_pids: False
 device:
-  detector_offset: 0.2
+  detector_offset: 0.02
   id: dev30794
 pid:
   laser:
@@ -39,8 +38,8 @@ pid:
     limit_upper: 0.1
     output: 5
     params:
-    - -100e-3
-    - -15e3
+    - 600e-3
+    - 0
     - 0
     pid_number: 3
   piezo:
@@ -53,6 +52,6 @@ pid:
     output: 5
     params:
     - 0
-    - 1e3
+    - -5e3
     - 0
     pid_number: 0

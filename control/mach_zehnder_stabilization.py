@@ -96,12 +96,18 @@ class MachZehnderManager(MZManagerInterface):
     def toggle_locks(self, value: bool):
         toggle_locks(self._mdrec, value, dev=self._device_id)
 
-    def perform_range_calibration(self) -> Dict:
+    def perform_range_calibration(self, reset_pids: Optional[bool] = True) -> Dict:
         """Perform range calibration and save results"""
+
+        restart_monitor = False
+        if self._monitoring_active:
+            restart_monitor = True
+            self.stop_monitoring()
 
         par, cov, hist, edges = calibrate_range(
             self._mdrec,
             dev=self._device_id,
+            reset_pids=reset_pids,
             **self._config['demodulators']['phase_drive']
         )
         
@@ -115,6 +121,9 @@ class MachZehnderManager(MZManagerInterface):
         }
         path = self._config_path / self._config['calibration_paths']['range']
         self._save_calibration_data(path, data)
+        if restart_monitor:
+            self.start_monitoring()
+
         return data
     
     def save_current_pid_config(self):

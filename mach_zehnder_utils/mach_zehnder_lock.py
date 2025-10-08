@@ -88,7 +88,7 @@ def check_channel(mdrec, dev: str, pid_num: int, aux_num: int, tolerance_percent
     lower = mdrec.lock_in.getDouble(f'/{dev}/pids/{pid_num}/limitlower')
     upper = mdrec.lock_in.getDouble(f'/{dev}/pids/{pid_num}/limitupper')
     total_range = upper - lower
-    allowed_deviation = (total_range * tolerance_percent) / 100
+    allowed_deviation = (total_range * tolerance_percent) / 100 / 2
 
     val = mdrec.lock_in.getDouble(f'/{dev}/auxouts/{aux_num}/offset')
     if not (center - allowed_deviation) < val < (center + allowed_deviation):
@@ -112,7 +112,7 @@ def check_locks(mdrec, dev='dev30794', channels=None, tolerance_percent=85,
         laser_aux (int): Auxiliary output number for laser
     """
     if channels is None:
-        channels = ['piezo', 'laser']
+        channels = ['piezo']
 
     if 'piezo' in channels:
         check_channel(mdrec, dev, piezo_pid, piezo_aux, tolerance_percent)
