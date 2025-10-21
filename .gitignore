@@ -368,3 +368,6 @@ testing_ZIAPI.ipynb
 zhinst_utils/.DS_Store
 .DS_Store
 *__pycache__*
+/.ipynb_checkpoints/*
+config/mach_zehnder/calibrations/*
+quick_manage_test.ipynb
