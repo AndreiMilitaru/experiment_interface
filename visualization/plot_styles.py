@@ -17,6 +17,15 @@ class PlotStyle:
     grid: bool = True
     grid_alpha: float = 0.3
     tick_direction: str = 'in'
+    tick_bottom: bool = True
+    tick_top: bool = True
+    tick_left: bool = True
+    tick_right: bool = True
+    ylabel_color: Optional[str] = 'black'
+    xlabel_color: Optional[str] = 'black'
+    title_color: Optional[str] = 'black'
+    xtick_color: Optional[str] = 'black'
+    ytick_color: Optional[str] = 'black'
 
     # Colorbar specific parameters
     cbar_label: Optional[str] = None

@@ -120,16 +120,12 @@ def set_ax(
     if style.fs_legend is None:
         style.fs_legend = style.fs_ticks - 1
     if style.xlabel is not None:
-        ax.set_xlabel(style.xlabel,fontsize=style.fs)
+        ax.set_xlabel(style.xlabel,fontsize=style.fs, color=style.xlabel_color)
     if style.ylabel is not None:
-        ax.set_ylabel(style.ylabel,fontsize=style.fs)
+        ax.set_ylabel(style.ylabel,fontsize=style.fs, color=style.ylabel_color)
     if style.title is not None:
-        ax.set_title(style.title,fontsize=style.fs_title)
-    if style.xticks is not None:
-        ax.set_xticks(style.xticks)
-    if style.yticks is not None:
-        ax.set_yticks(style.yticks)
-    
+        ax.set_title(style.title,fontsize=style.fs_title, color=style.title_color)
+
     # Handle ticks and labels (now as function parameters)
     if xticks is not None:
         ax.set_xticks(xticks)
@@ -142,7 +138,7 @@ def set_ax(
         else:
             ax.set_xticklabels(xticklabels, fontsize=style.fs_ticks)
     else:
-        ax.tick_params(axis='x', labelsize=style.fs_ticks)
+        ax.tick_params(axis='x', labelsize=style.fs_ticks, colors=style.xtick_color)
     
     if yticklabels is not None:
         if yticklabels == '':
@@ -150,7 +146,7 @@ def set_ax(
         else:
             ax.set_yticklabels(yticklabels, fontsize=style.fs_ticks)
     else:
-        ax.tick_params(axis='y', labelsize=style.fs_ticks)
+        ax.tick_params(axis='y', labelsize=style.fs_ticks, colors=style.ytick_color)
     
     if style.legend:
         try:
@@ -166,8 +162,8 @@ def set_ax(
             print(f"Error adding colorbar: {e}")
     if style.grid:
         ax.grid()
-    ax.tick_params(which='both', direction=style.tick_direction, bottom=True,
-                   top=True, left=True, right=True)
+    ax.tick_params(which='both', direction=style.tick_direction, bottom=style.tick_bottom,
+                   top=style.tick_top, left=style.tick_left, right=style.tick_right)
     if style.grid:
         try:
             ax.tick_params(grid_alpha=getattr(style, 'grid_alpha', 0.3))
