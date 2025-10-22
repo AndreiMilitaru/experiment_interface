@@ -26,7 +26,7 @@ class CavityControlGUI(QMainWindow):
 
     def __init__(self, mdrec=None, fg=None, parent=None, device_id=None,
                   dither_pid=None, dither_drive_demod=None, dither_in_demod=None,
-                  verbose=False):
+                  verbose=False, mdrec_lock=None, fg_lock=None):
         """Initialize the GUI with optional verbose mode"""
         super().__init__(parent)
         self.verbose = verbose
@@ -36,6 +36,9 @@ class CavityControlGUI(QMainWindow):
         self.dither_pid = dither_pid
         self.dither_drive_demod = dither_drive_demod
         self.dither_in_demod = dither_in_demod
+        # Add locks for thread safety
+        self.mdrec_lock = mdrec_lock
+        self.fg_lock = fg_lock
 
         # Initialize UI
         self.init_ui()
@@ -64,75 +67,165 @@ class CavityControlGUI(QMainWindow):
 
     def get_mdrec_p_gain(self):
         """Get P gain from mdrec"""
-        response = self.mdrec.lock_in.get(f'/{self.device_id}/pids/{self.dither_pid}/p')
-        return float(response[self.device_id]['pids'][str(self.dither_pid)]['p']['value'][0])
+        if self.mdrec_lock:
+            self.mdrec_lock.acquire()
+        try:
+            response = self.mdrec.lock_in.get(f'/{self.device_id}/pids/{self.dither_pid}/p')
+            return float(response[self.device_id]['pids'][str(self.dither_pid)]['p']['value'][0])
+        finally:
+            if self.mdrec_lock:
+                self.mdrec_lock.release()
 
     def get_mdrec_i_gain(self):
         """Get I gain from mdrec"""
-        response = self.mdrec.lock_in.get(f'/{self.device_id}/pids/{self.dither_pid}/i') 
-        return float(response[self.device_id]['pids'][str(self.dither_pid)]['i']['value'][0])
+        if self.mdrec_lock:
+            self.mdrec_lock.acquire()
+        try:
+            response = self.mdrec.lock_in.get(f'/{self.device_id}/pids/{self.dither_pid}/i') 
+            return float(response[self.device_id]['pids'][str(self.dither_pid)]['i']['value'][0])
+        finally:
+            if self.mdrec_lock:
+                self.mdrec_lock.release()
 
     def get_mdrec_bandwidth(self):
         """Get bandwidth from mdrec"""
-        response = self.mdrec.lock_in.get(f'/{self.device_id}/pids/{self.dither_pid}/demod/timeconstant')
-        return df2tc(float(response[self.device_id]['pids'][str(self.dither_pid)]['demod']['timeconstant']['value'][0]))
+        if self.mdrec_lock:
+            self.mdrec_lock.acquire()
+        try:
+            response = self.mdrec.lock_in.get(f'/{self.device_id}/pids/{self.dither_pid}/demod/timeconstant')
+            return df2tc(float(response[self.device_id]['pids'][str(self.dither_pid)]['demod']['timeconstant']['value'][0]))
+        finally:
+            if self.mdrec_lock:
+                self.mdrec_lock.release()
 
     def get_mdrec_pid_enabled(self):
         """Get PID enabled state from mdrec"""
-        response = self.mdrec.lock_in.get(f'/{self.device_id}/pids/{self.dither_pid}/enable')
-        return float(response[self.device_id]['pids'][str(self.dither_pid)]['enable']['value'][0]) == 1
+        if self.mdrec_lock:
+            self.mdrec_lock.acquire()
+        try:
+            response = self.mdrec.lock_in.get(f'/{self.device_id}/pids/{self.dither_pid}/enable')
+            return float(response[self.device_id]['pids'][str(self.dither_pid)]['enable']['value'][0]) == 1
+        finally:
+            if self.mdrec_lock:
+                self.mdrec_lock.release()
 
     def get_mdrec_keep_i(self):
         """Get keep I value from mdrec"""
-        response = self.mdrec.lock_in.get(f'/{self.device_id}/pids/{self.dither_pid}/keepint')
-        return float(response[self.device_id]['pids'][str(self.dither_pid)]['keepint']['value'][0]) == 1
+        if self.mdrec_lock:
+            self.mdrec_lock.acquire()
+        try:
+            response = self.mdrec.lock_in.get(f'/{self.device_id}/pids/{self.dither_pid}/keepint')
+            return float(response[self.device_id]['pids'][str(self.dither_pid)]['keepint']['value'][0]) == 1
+        finally:
+            if self.mdrec_lock:
+                self.mdrec_lock.release()
 
     def get_mdrec_output_offset(self):
         """Get output offset from mdrec"""
-        response = self.mdrec.lock_in.get(f'/{self.device_id}/sigouts/0/offset')
-        return float(response[self.device_id]['sigouts']['0']['offset']['value'][0])
+        if self.mdrec_lock:
+            self.mdrec_lock.acquire()
+        try:
+            response = self.mdrec.lock_in.get(f'/{self.device_id}/sigouts/0/offset')
+            return float(response[self.device_id]['sigouts']['0']['offset']['value'][0])
+        finally:
+            if self.mdrec_lock:
+                self.mdrec_lock.release()
 
     def get_mdrec_dither_freq(self):
         """Get dither frequency from mdrec"""
-        response = self.mdrec.lock_in.get(f'/{self.device_id}/oscs/{self.dither_drive_demod}/freq')
-        # Convert Hz to kHz for display
-        return float(response[self.device_id]['oscs'][str(self.dither_drive_demod)]['freq']['value'][0]) / 1000.0
+        if self.mdrec_lock:
+            self.mdrec_lock.acquire()
+        try:
+            response = self.mdrec.lock_in.get(f'/{self.device_id}/oscs/{self.dither_drive_demod}/freq')
+            # Convert Hz to kHz for display
+            return float(response[self.device_id]['oscs'][str(self.dither_drive_demod)]['freq']['value'][0]) / 1000.0
+        finally:
+            if self.mdrec_lock:
+                self.mdrec_lock.release()
 
     def get_mdrec_dither_strength(self):
         """Get dither strength from mdrec"""
-        response = self.mdrec.lock_in.get(f'/{self.device_id}/sigouts/0/amplitudes/{self.dither_drive_demod}')
-        return float(response[self.device_id]['sigouts']['0']['amplitudes'][str(self.dither_drive_demod)]['value'][0])
+        if self.mdrec_lock:
+            self.mdrec_lock.acquire()
+        try:
+            response = self.mdrec.lock_in.get(f'/{self.device_id}/sigouts/0/amplitudes/{self.dither_drive_demod}')
+            return float(response[self.device_id]['sigouts']['0']['amplitudes'][str(self.dither_drive_demod)]['value'][0])
+        finally:
+            if self.mdrec_lock:
+                self.mdrec_lock.release()
 
     def get_mdrec_demod_phase(self):
         """Get demodulation phase from mdrec"""
-        response = self.mdrec.lock_in.get(f'/{self.device_id}/demods/{self.dither_in_demod}/phaseshift')
-        return float(response[self.device_id]['demods'][str(self.dither_in_demod)]['phaseshift']['value'][0])
+        if self.mdrec_lock:
+            self.mdrec_lock.acquire()
+        try:
+            response = self.mdrec.lock_in.get(f'/{self.device_id}/demods/{self.dither_in_demod}/phaseshift')
+            return float(response[self.device_id]['demods'][str(self.dither_in_demod)]['phaseshift']['value'][0])
+        finally:
+            if self.mdrec_lock:
+                self.mdrec_lock.release()
 
     def get_fg_waveform(self):
         """Get waveform from fg"""
-        # Strip any whitespace and convert to lowercase to ensure proper matching
-        return self.fg.out_waveform.strip().lower()
+        if self.fg_lock:
+            self.fg_lock.acquire()
+        try:
+            # Strip any whitespace and convert to lowercase to ensure proper matching
+            return self.fg.out_waveform.strip().lower()
+        finally:
+            if self.fg_lock:
+                self.fg_lock.release()
 
     def get_fg_amplitude(self):
         """Get amplitude from fg in mV"""
-        return self.fg.out_amplitude * 1000  # Convert V to mV
+        if self.fg_lock:
+            self.fg_lock.acquire()
+        try:
+            return self.fg.out_amplitude * 1000  # Convert V to mV
+        finally:
+            if self.fg_lock:
+                self.fg_lock.release()
 
     def get_fg_frequency(self):
         """Get frequency from fg"""
-        return self.fg.out_frequency
+        if self.fg_lock:
+            self.fg_lock.acquire()
+        try:
+            return self.fg.out_frequency
+        finally:
+            if self.fg_lock:
+                self.fg_lock.release()
 
     def get_fg_offset(self):
         """Get offset from fg"""
-        return self.fg.out_offset
+        if self.fg_lock:
+            self.fg_lock.acquire()
+        try:
+            return self.fg.out_offset
+        finally:
+            if self.fg_lock:
+                self.fg_lock.release()
 
     def get_fg_output_enabled(self):
         """Get output enabled state from fg"""
-        return self.fg.out
+        if self.fg_lock:
+            self.fg_lock.acquire()
+        try:
+            return self.fg.out
+        finally:
+            if self.fg_lock:
+                self.fg_lock.release()
 
     def get_mdrec_dither_enable(self):
         """Get dither enable state from mdrec"""
-        response = self.mdrec.lock_in.get(f'/{self.device_id}/sigouts/0/enables/{self.dither_drive_demod}')
-        return float(response[self.device_id]['sigouts']['0']['enables'][str(self.dither_drive_demod)]['value'][0]) == 1
+        if self.mdrec_lock:
+            self.mdrec_lock.acquire()
+        try:
+            response = self.mdrec.lock_in.get(f'/{self.device_id}/sigouts/0/enables/{self.dither_drive_demod}')
+            return float(response[self.device_id]['sigouts']['0']['enables'][str(self.dither_drive_demod)]['value'][0]) == 1
+        finally:
+            if self.mdrec_lock:
+                self.mdrec_lock.release()
 
     def set_initial_values_from_devices(self):
         """Set initial values for widgets from mdrec and fg"""
@@ -596,7 +689,13 @@ class CavityControlGUI(QMainWindow):
         
         # Apply to device if PID is disabled
         if self.mdrec and not self.pid_enable_checkbox.isChecked():
-            self.mdrec.lock_in.set(f'/{self.device_id}/sigouts/0/offset', total_offset_v)
+            if self.mdrec_lock:
+                self.mdrec_lock.acquire()
+            try:
+                self.mdrec.lock_in.set(f'/{self.device_id}/sigouts/0/offset', total_offset_v)
+            finally:
+                if self.mdrec_lock:
+                    self.mdrec_lock.release()
             self.output_value_label.setText(f"{total_offset_v:.3f} V")
 
     @pyqtSlot(int)
@@ -611,21 +710,39 @@ class CavityControlGUI(QMainWindow):
         """Handle P gain changed event"""
         if self.mdrec:
             self.log(f"P gain changed to {value}")
-            self.mdrec.lock_in.set(f'/{self.device_id}/pids/{self.dither_pid}/p', value)
+            if self.mdrec_lock:
+                self.mdrec_lock.acquire()
+            try:
+                self.mdrec.lock_in.set(f'/{self.device_id}/pids/{self.dither_pid}/p', value)
+            finally:
+                if self.mdrec_lock:
+                    self.mdrec_lock.release()
 
     @pyqtSlot(float)
     def on_i_gain_changed(self, value):
         """Handle I gain changed event"""
         if self.mdrec:
             self.log(f"I gain changed to {value}")
-            self.mdrec.lock_in.set(f'/{self.device_id}/pids/{self.dither_pid}/i', value)
+            if self.mdrec_lock:
+                self.mdrec_lock.acquire()
+            try:
+                self.mdrec.lock_in.set(f'/{self.device_id}/pids/{self.dither_pid}/i', value)
+            finally:
+                if self.mdrec_lock:
+                    self.mdrec_lock.release()
 
     @pyqtSlot(float)
     def on_bandwidth_changed(self, value):
         """Handle bandwidth changed event"""
         if self.mdrec:
             self.log(f"Bandwidth changed to {value}")
-            self.mdrec.lock_in.set(f'/{self.device_id}/pids/{self.dither_pid}/demod/timeconstant', df2tc(value))
+            if self.mdrec_lock:
+                self.mdrec_lock.acquire()
+            try:
+                self.mdrec.lock_in.set(f'/{self.device_id}/pids/{self.dither_pid}/demod/timeconstant', df2tc(value))
+            finally:
+                if self.mdrec_lock:
+                    self.mdrec_lock.release()
 
     @pyqtSlot(int)
     def on_pid_enable_changed(self, state):
@@ -633,14 +750,26 @@ class CavityControlGUI(QMainWindow):
         enabled = state == Qt.Checked
         if self.mdrec:
             self.log(f"PID enable changed to {enabled}")
-            self.mdrec.lock_in.set(f'/{self.device_id}/pids/{self.dither_pid}/enable', int(enabled))
+            if self.mdrec_lock:
+                self.mdrec_lock.acquire()
+            try:
+                self.mdrec.lock_in.set(f'/{self.device_id}/pids/{self.dither_pid}/enable', int(enabled))
+            finally:
+                if self.mdrec_lock:
+                    self.mdrec_lock.release()
         self.update_offset_spinbox_state()
         self.update_status_indicators()
         if not enabled and self.mdrec:
             # When disabling PID, set output offset to current offset spinbox value
             offset_value = self.offset_spinbox.value()
             self.log(f"Setting output offset to {offset_value} V on PID disable")
-            offset_value = self.mdrec.lock_in.get(f'/{self.device_id}/sigouts/0/offset')
+            if self.mdrec_lock:
+                self.mdrec_lock.acquire()
+            try:
+                offset_value = self.mdrec.lock_in.get(f'/{self.device_id}/sigouts/0/offset')
+            finally:
+                if self.mdrec_lock:
+                    self.mdrec_lock.release()
 
     @pyqtSlot(int)
     def on_keep_i_changed(self, state):
@@ -648,7 +777,13 @@ class CavityControlGUI(QMainWindow):
         enabled = state == Qt.Checked
         if self.mdrec:
             self.log(f"Keep I value changed to {enabled}")
-            self.mdrec.lock_in.set(f'/{self.device_id}/pids/{self.dither_pid}/keepint', int(enabled))
+            if self.mdrec_lock:
+                self.mdrec_lock.acquire()
+            try:
+                self.mdrec.lock_in.set(f'/{self.device_id}/pids/{self.dither_pid}/keepint', int(enabled))
+            finally:
+                if self.mdrec_lock:
+                    self.mdrec_lock.release()
 
     @pyqtSlot(float)
     def on_offset_changed(self, value):
@@ -656,7 +791,13 @@ class CavityControlGUI(QMainWindow):
         if self.mdrec and not self.pid_enable_checkbox.isChecked():
             # Apply the total offset directly to the device
             self.log(f"Total offset changed to {value:.3f} V")
-            self.mdrec.lock_in.set(f'/{self.device_id}/sigouts/0/offset', value)
+            if self.mdrec_lock:
+                self.mdrec_lock.acquire()
+            try:
+                self.mdrec.lock_in.set(f'/{self.device_id}/sigouts/0/offset', value)
+            finally:
+                if self.mdrec_lock:
+                    self.mdrec_lock.release()
             
             # Calculate the new base offset by removing the fine adjustment
             fine_offset_v = (self.fine_offset_slider.value() * 0.5) / 1000.0
@@ -684,7 +825,13 @@ class CavityControlGUI(QMainWindow):
         if self.mdrec:
             self.log(f"Dither frequency changed to {value:.3f} kHz")
             # Convert kHz to Hz for device setting
-            self.mdrec.lock_in.set(f'/{self.device_id}/oscs/{self.dither_drive_demod}/freq', value * 1000.0)
+            if self.mdrec_lock:
+                self.mdrec_lock.acquire()
+            try:
+                self.mdrec.lock_in.set(f'/{self.device_id}/oscs/{self.dither_drive_demod}/freq', value * 1000.0)
+            finally:
+                if self.mdrec_lock:
+                    self.mdrec_lock.release()
 
     @pyqtSlot(float)
     def on_dither_strength_changed(self, value):
@@ -692,7 +839,13 @@ class CavityControlGUI(QMainWindow):
         if self.mdrec:
             self.log(f"Dither strength changed to {value:.3f} mV")
             # Convert mV to V for device setting
-            self.mdrec.lock_in.set(f'/{self.device_id}/sigouts/0/amplitudes/{self.dither_drive_demod}', value/1000.0)
+            if self.mdrec_lock:
+                self.mdrec_lock.acquire()
+            try:
+                self.mdrec.lock_in.set(f'/{self.device_id}/sigouts/0/amplitudes/{self.dither_drive_demod}', value/1000.0)
+            finally:
+                if self.mdrec_lock:
+                    self.mdrec_lock.release()
 
     @pyqtSlot(int)
     def on_dither_enable_changed(self, state):
@@ -700,7 +853,13 @@ class CavityControlGUI(QMainWindow):
         enabled = state == Qt.Checked
         if self.mdrec:
             self.log(f"Dither enable changed to {enabled}")
-            self.mdrec.lock_in.set(f'/{self.device_id}/sigouts/0/enables/{self.dither_drive_demod}', int(enabled))
+            if self.mdrec_lock:
+                self.mdrec_lock.acquire()
+            try:
+                self.mdrec.lock_in.set(f'/{self.device_id}/sigouts/0/enables/{self.dither_drive_demod}', int(enabled))
+            finally:
+                if self.mdrec_lock:
+                    self.mdrec_lock.release()
             self.update_status_indicators()
 
     @pyqtSlot(float)
@@ -708,11 +867,18 @@ class CavityControlGUI(QMainWindow):
         """Handle demodulation phase changed event"""
         if self.mdrec:
             self.log(f"Demodulation phase changed to {value:.1f} deg")
-            self.mdrec.lock_in.set(f'/{self.device_id}/demods/{self.dither_in_demod}/phaseshift', value)
-            # Fix the phase slider update by extracting the value from the response
+            if self.mdrec_lock:
+                self.mdrec_lock.acquire()
+            try:
+                self.mdrec.lock_in.set(f'/{self.device_id}/demods/{self.dither_in_demod}/phaseshift', value)
+                # Fix the phase slider update by extracting the value from the response
+                response = self.mdrec.lock_in.get(f'/{self.device_id}/demods/{self.dither_in_demod}/phaseshift')
+                phase_value = float(response[self.device_id]['demods'][str(self.dither_in_demod)]['phaseshift']['value'][0])
+            finally:
+                if self.mdrec_lock:
+                    self.mdrec_lock.release()
+                    
             self.phase_slider.blockSignals(True)
-            response = self.mdrec.lock_in.get(f'/{self.device_id}/demods/{self.dither_in_demod}/phaseshift')
-            phase_value = float(response[self.device_id]['demods'][str(self.dither_in_demod)]['phaseshift']['value'][0])
             self.phase_slider.setValue(int(phase_value))
             self.phase_slider.blockSignals(False)
     
@@ -723,7 +889,13 @@ class CavityControlGUI(QMainWindow):
         waveform = self.WAVEFORMS[index]  # Get waveform from index
         if self.fg:
             self.log(f"Waveform changed to {waveform}")
-            self.fg.out_waveform = waveform  # Set waveform using fg's property
+            if self.fg_lock:
+                self.fg_lock.acquire()
+            try:
+                self.fg.out_waveform = waveform  # Set waveform using fg's property
+            finally:
+                if self.fg_lock:
+                    self.fg_lock.release()
         self.update_status_indicators()
     
     @pyqtSlot(float)
@@ -734,12 +906,20 @@ class CavityControlGUI(QMainWindow):
             total_amplitude_mv = value_mv + self.amplitude_fine_slider.value()
             value_v = total_amplitude_mv / 1000.0  # Convert mV to V
             self.log(f"Amplitude changed to {total_amplitude_mv:.1f} mV")
-            self.fg.out_amplitude = value_v
             
-            # Set offset to half of total amplitude
-            offset_mv = total_amplitude_mv / 2.0
-            offset_v = offset_mv / 1000.0
-            self.fg.out_offset = offset_v
+            if self.fg_lock:
+                self.fg_lock.acquire()
+            try:
+                self.fg.out_amplitude = value_v
+                
+                # Set offset to half of total amplitude
+                offset_mv = total_amplitude_mv / 2.0
+                offset_v = offset_mv / 1000.0
+                self.fg.out_offset = offset_v
+            finally:
+                if self.fg_lock:
+                    self.fg_lock.release()
+                    
             self.fg_offset_spinbox.setValue(offset_mv)  # Update display in mV
 
     @pyqtSlot(int)
@@ -751,12 +931,20 @@ class CavityControlGUI(QMainWindow):
             total_amplitude_mv = self.amplitude_spinbox.value() + fine_mv
             value_v = total_amplitude_mv / 1000.0  # Convert mV to V
             self.log(f"Fine adjustment: {fine_mv:+d} mV, total amplitude: {total_amplitude_mv:.1f} mV")
-            self.fg.out_amplitude = value_v
             
-            # Set offset to half of total amplitude
-            offset_mv = total_amplitude_mv / 2.0
-            offset_v = offset_mv / 1000.0
-            self.fg.out_offset = offset_v
+            if self.fg_lock:
+                self.fg_lock.acquire()
+            try:
+                self.fg.out_amplitude = value_v
+                
+                # Set offset to half of total amplitude
+                offset_mv = total_amplitude_mv / 2.0
+                offset_v = offset_mv / 1000.0
+                self.fg.out_offset = offset_v
+            finally:
+                if self.fg_lock:
+                    self.fg_lock.release()
+                    
             self.fg_offset_spinbox.setValue(offset_mv)  # Update display in mV
 
     @pyqtSlot(float)
@@ -764,7 +952,13 @@ class CavityControlGUI(QMainWindow):
         """Handle frequency changed event"""
         if self.fg:
             self.log(f"Frequency changed to {value:.1f} Hz")
-            self.fg.out_frequency = value
+            if self.fg_lock:
+                self.fg_lock.acquire()
+            try:
+                self.fg.out_frequency = value
+            finally:
+                if self.fg_lock:
+                    self.fg_lock.release()
 
     @pyqtSlot(int)
     def on_output_toggled(self, state):
@@ -772,7 +966,13 @@ class CavityControlGUI(QMainWindow):
         enabled = state == Qt.Checked
         if self.fg:
             self.log(f"Output toggled to {enabled}")
-            self.fg.out = enabled
+            if self.fg_lock:
+                self.fg_lock.acquire()
+            try:
+                self.fg.out = enabled
+            finally:
+                if self.fg_lock:
+                    self.fg_lock.release()
             self.update_status_indicators()
 
     @pyqtSlot(int)
@@ -794,7 +994,13 @@ class CavityControlGUI(QMainWindow):
         # Apply to device if PID is disabled
         if self.mdrec and not self.pid_enable_checkbox.isChecked():
             self.log(f"Fine adjustment: {fine_offset_mv:+.1f} mV, total offset: {total_offset_v:.3f} V")
-            self.mdrec.lock_in.set(f'/{self.device_id}/sigouts/0/offset', total_offset_v)
+            if self.mdrec_lock:
+                self.mdrec_lock.acquire()
+            try:
+                self.mdrec.lock_in.set(f'/{self.device_id}/sigouts/0/offset', total_offset_v)
+            finally:
+                if self.mdrec_lock:
+                    self.mdrec_lock.release()
             self.output_value_label.setText(f"{total_offset_v:.3f} V")
 
     def log(self, message):
@@ -804,15 +1010,15 @@ class CavityControlGUI(QMainWindow):
 
 
 # Example usage:
-def main(mdrec=None, fg=None, device_id=None, dither_pid=None, dither_drive_demod=None, dither_in_demod=None, verbose=False):
+def main(mdrec=None, fg=None, device_id=None, dither_pid=None, dither_drive_demod=None, dither_in_demod=None, verbose=False, mdrec_lock=None, fg_lock=None):
     app = QApplication(sys.argv)
     # Set app style for consistent appearance across platforms
     app.setStyle("Fusion")
     
-    # Assuming mdrec and fg are already initialized elsewhere
+    # Passing locks to the GUI
     window = CavityControlGUI(mdrec=mdrec, fg=fg, device_id=device_id, dither_pid=dither_pid,
                               dither_drive_demod=dither_drive_demod, dither_in_demod=dither_in_demod,
-                              verbose=verbose)
+                              verbose=verbose, mdrec_lock=mdrec_lock, fg_lock=fg_lock)
     window.show()
     sys.exit(app.exec_())
 
@@ -820,6 +1026,7 @@ def main(mdrec=None, fg=None, device_id=None, dither_pid=None, dither_drive_demo
 if __name__ == "__main__":
     from experiment_interface.zhinst_utils.demodulation_recorder import zhinst_demod_recorder
     from experiment_interface.control.device.function_generator import SingleOutput
+    import threading
 
     ip_PC = '10.21.217.191'
     ip_fg = '10.21.217.150'
@@ -835,12 +1042,18 @@ if __name__ == "__main__":
     dummy_test = False
 
     if not dummy_test:
+        # Create locks for thread safety
+        mdrec_lock = threading.Lock()
+        fg_lock = threading.Lock()
+        
         mdrec = zhinst_demod_recorder(ip_PC, devtype='MFLI')
         fg = SingleOutput(visa_resource_fg)
     else:
         mdrec = None 
-        fg = None 
+        fg = None
+        mdrec_lock = None
+        fg_lock = None
 
     main(mdrec=mdrec, fg=fg, device_id=device_id, dither_pid=pid_dither,    
          dither_drive_demod=dither_drive_demod, dither_in_demod=dither_in_demod,
-         verbose=False)
+         verbose=False, mdrec_lock=mdrec_lock, fg_lock=fg_lock)
