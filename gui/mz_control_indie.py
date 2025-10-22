@@ -1,10 +1,9 @@
 """
-Mach-Zehnder Control GUI
+Independent Mach-Zehnder Control GUI
 Author: GitHub Copilot (based on requirements by Andrei Militaru)
 Date: October 2025
-Description: Thread-safe modular GUI for controlling Mach-Zehnder interferometer 
-with externally provided components, enabling flexible integration with different 
-hardware configurations and shared resource management.
+Description: Self-contained GUI interface for controlling Mach-Zehnder interferometer,
+handling its own configuration and initialization of hardware resources.
 """
 
 import sys
@@ -19,7 +18,6 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QPushBu
 from PyQt5.QtCore import Qt, QTimer, pyqtSlot
 from PyQt5.QtGui import QFont
 
-from gui.config_dialog import ConfigDialog
 from mach_zehnder_utils.dummy_manager import DummyMZManager
 from visualization.mach_zehnder_visualizer import MachZehnderVisualizer
 
@@ -39,47 +37,35 @@ class ToolTip:
         self.text = text
         self.widget.setToolTip(text)
 
-class MZControlGUI(QMainWindow):
-    """Thread-safe Mach-Zehnder interferometer control GUI that takes external components as input,
-    enabling flexible integration with different hardware configurations and shared resource management."""
+class MZControlIndyGUI(QMainWindow):
+    """Self-contained Mach-Zehnder interferometer control GUI that manages its own
+    configuration and hardware initialization."""
     
-    def __init__(self, mdrec=None, manager=None, mdrec_lock=None, config_path=None, parent=None):
-        """Initialize the GUI with provided components"""
+    def __init__(self):
+        """Initialize the GUI with self-contained configuration dialog"""
         super().__init__()
-        self.setWindowTitle("Mach-Zehnder Phase Control")
+        self.setWindowTitle("Mach-Zehnder Phase Control (Independent)")
         
         # Hide main window initially
         self.hide()
         
         # Initialize manager to None first
-        self.manager = manager
+        self.manager = None
         self.visualizer = None  # Will be initialized in _check_config_and_continue
-        self.mdrec = mdrec
-        self.mdrec_lock = mdrec_lock
         
         # Get configuration
-        self.config_dialog = ConfigDialog()
+        self._get_configuration()
         
-        # Wait for the dialog to complete properly
-        if self.config_dialog.exec_() == QDialog.Accepted:
-            self._check_config_and_continue()
-        else:
-            sys.exit(0)
-        
-    def _check_config_and_continue(self):
-        """Process configuration and initialize systems"""
-        # Get configuration from dialog
-        config = self.config_dialog.result
-        
-        if not config:
-            print("No valid configuration from dialog, using dummy mode fallback")
-            config = {
-                'dummy_mode': True,
-                'interval': 1.0,  # Default interval
-                'ip': '',
-                'device_type': '',
-                'config_path': ''
-            }
+    def _get_configuration(self):
+        """Self-contained configuration retrieval and processing"""
+        # Default configuration
+        config = {
+            'dummy_mode': True,
+            'interval': 1.0,  # Default interval
+            'ip': '',
+            'device_type': '',
+            'config_path': ''
+        }
 
         # Get the project root directory (parent of gui directory)
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -469,7 +455,7 @@ class MZControlGUI(QMainWindow):
 if __name__ == "__main__":
     try:
         app = QApplication(sys.argv)
-        window = MZControlGUI()
+        window = MZControlIndyGUI()
         sys.exit(app.exec_())
     except Exception as e:
         print(f"Error starting application: {e}")
