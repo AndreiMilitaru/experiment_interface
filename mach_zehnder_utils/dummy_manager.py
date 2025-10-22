@@ -8,35 +8,9 @@ class DummyMZManager(MZManagerInterface):
         self._monitoring = False
         self._setpoint = 0.0
         self._lock_check_interval = lock_check_interval
+        self._locks_enabled = False
+        self._latest_lock_quality = 0.9  # Store as private attribute
         
-    def perform_range_calibration(self) -> Dict:
-        return {
-            'parameters': np.array([1.0, 2.0]),
-            'covariance': np.array([[0.1, 0], [0, 0.1]]),
-            'histogram': np.array([1, 2, 3]),
-            'edges': np.array([0, 1, 2, 3]),
-            'timestamp': datetime.now().isoformat()
-        }
-    
-    def perform_visibility_calibration(self) -> Dict:
-        return {
-            'visibility': 0.95,
-            'timestamp': datetime.now().isoformat()
-        }
-    
-    def evaluate_current_lock(self) -> Dict:
-        return {
-            'lock_parameters': np.array([1.0, 0.1]),
-            'lock_covariance': np.array([[0.01, 0], [0, 0.01]]),
-            'histogram': np.array([1, 2, 3]),
-            'edges': np.array([0, 1, 2, 3]),
-            'timestamp': datetime.now().isoformat()
-        }
-    
-    @property
-    def latest_lock_quality(self) -> Optional[float]:
-        return 0.9
-    
     @property
     def setpoint(self) -> float:
         return self._setpoint
@@ -52,7 +26,65 @@ class DummyMZManager(MZManagerInterface):
         self._monitoring = False
     
     def save_current_pid_config(self):
-        pass
-    
+        """Save current PID configuration"""
+        print("Dummy: Saving PID configuration")
+        
     def load_latest_pid_config(self):
-        pass
+        """Load latest PID configuration"""
+        print("Dummy: Loading PID configuration")
+        
+    def perform_range_calibration(self) -> Dict:
+        """Perform range calibration"""
+        print("Dummy: Performing range calibration")
+        return {
+            'par': np.array([1.0, 0.0, 5.0]),  # [amplitude, vmin, vmax]
+            'timestamp': datetime.now().isoformat()
+        }
+        
+    def perform_visibility_calibration(self) -> Dict:
+        """Perform visibility calibration"""
+        print("Dummy: Measuring visibility")
+        return {
+            'visibility': 0.95,
+            'timestamp': datetime.now().isoformat()
+        }
+        
+    def evaluate_current_lock(self) -> Dict:
+        """Evaluate current lock quality"""
+        print("Dummy: Evaluating lock quality")
+        # Update private attribute to match interface requirements
+        self._latest_lock_quality = 0.9
+        return {
+            'timestamp': datetime.now().isoformat()
+        }
+    
+    @property
+    def latest_lock_quality(self) -> Optional[float]:
+        """Return latest lock quality - implemented as property to satisfy abstract method"""
+        return self._latest_lock_quality
+    
+    def get_latest_range_calibration(self) -> Optional[Dict]:
+        """Get latest range calibration results"""
+        return {
+            'par': np.array([1.0, 0.0, 5.0]),  # [amplitude, vmin, vmax]
+            'timestamp': datetime.now().isoformat()
+        }
+    
+    def get_latest_visibility(self) -> Optional[Dict]:
+        """Get latest visibility measurement"""
+        return {
+            'visibility': 0.95,
+            'timestamp': datetime.now().isoformat()
+        }
+    
+    def get_latest_lock_evaluation(self) -> Optional[Dict]:
+        """Get latest lock evaluation results"""
+        return {
+            'quality': 0.9,
+            'timestamp': datetime.now().isoformat()
+        }
+        
+    def toggle_locks(self, enable: bool):
+        """Toggle locks on/off"""
+        self._locks_enabled = enable
+        print(f"Dummy: {'Enabling' if enable else 'Disabling'} locks")

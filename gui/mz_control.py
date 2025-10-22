@@ -9,129 +9,47 @@ hardware configurations and shared resource management.
 
 import sys
 import os
-import yaml
 from datetime import datetime
 import matplotlib.pyplot as plt
+from typing import Optional, Any
+from pathlib import Path
 
+# PyQt imports
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QPushButton, 
                             QCheckBox, QLineEdit, QGroupBox, QGridLayout, QVBoxLayout, 
-                            QHBoxLayout, QFrame, QMessageBox, QToolTip)
-from PyQt5.QtCore import Qt, QTimer, pyqtSlot
+                            QHBoxLayout, QMessageBox, QToolTip)
+from PyQt5.QtCore import Qt, pyqtSlot
 from PyQt5.QtGui import QFont
 
-from gui.config_dialog import ConfigDialog
-from mach_zehnder_utils.dummy_manager import DummyMZManager
-from visualization.mach_zehnder_visualizer import MachZehnderVisualizer
-
-# Try to import hardware-dependent modules
-HARDWARE_AVAILABLE = False
-try:
-    from zhinst_utils.demodulation_recorder import zhinst_demod_recorder
-    from control.mach_zehnder_stabilization import MachZehnderManager
-    HARDWARE_AVAILABLE = True
-except ImportError:
-    print("Hardware modules not available. Running in dummy mode.")
-
-class ToolTip:
-    """Simple tooltip class for PyQt widgets"""
-    def __init__(self, widget, text, delay=1000):
-        self.widget = widget
-        self.text = text
-        self.widget.setToolTip(text)
+# Use absolute import instead of relative
+from experiment_interface.visualization.mach_zehnder_visualizer import MachZehnderVisualizer
 
 class MZControlGUI(QMainWindow):
-    """Thread-safe Mach-Zehnder interferometer control GUI that takes external components as input,
-    enabling flexible integration with different hardware configurations and shared resource management."""
+    """Thread-safe Mach-Zehnder interferometer control GUI that takes external components as input"""
     
-    def __init__(self, mdrec=None, manager=None, mdrec_lock=None, config_path=None, parent=None):
-        """Initialize the GUI with provided components"""
-        super().__init__()
+    def __init__(self, 
+                 manager: Any,  # Type hints kept generic to allow dummy/real managers
+                 config_path: str,
+                 parent: Optional[QMainWindow] = None):
+        """Initialize the GUI with provided components
+        
+        Args:
+            manager: Instance of MachZehnderManager or compatible dummy manager
+            config_path: Path to configuration file for visualizer
+            parent: Optional parent window
+        """
+        super().__init__(parent)
         self.setWindowTitle("Mach-Zehnder Phase Control")
         
-        # Hide main window initially
-        self.hide()
-        
-        # Initialize manager to None first
+        # Store components
         self.manager = manager
-        self.visualizer = None  # Will be initialized in _check_config_and_continue
-        self.mdrec = mdrec
-        self.mdrec_lock = mdrec_lock
-        
-        # Get configuration
-        self.config_dialog = ConfigDialog()
-        
-        # Wait for the dialog to complete properly
-        if self.config_dialog.exec_() == QDialog.Accepted:
-            self._check_config_and_continue()
-        else:
-            sys.exit(0)
-        
-    def _check_config_and_continue(self):
-        """Process configuration and initialize systems"""
-        # Get configuration from dialog
-        config = self.config_dialog.result
-        
-        if not config:
-            print("No valid configuration from dialog, using dummy mode fallback")
-            config = {
-                'dummy_mode': True,
-                'interval': 1.0,  # Default interval
-                'ip': '',
-                'device_type': '',
-                'config_path': ''
-            }
-
-        # Get the project root directory (parent of gui directory)
-        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        
-        # Resolve config path
-        if not config.get('config_path'):
-            # Use default config path relative to project root
-            config['config_path'] = os.path.join(project_root, 'config', 'mach_zehnder', 'default_config.yaml')
-        elif not os.path.isabs(config['config_path']):
-            # If path is relative, make it relative to project root
-            config['config_path'] = os.path.join(project_root, config['config_path'])
-        
-        # Normalize the path for the current OS
-        config['config_path'] = os.path.normpath(config['config_path'])
-        
-        print(f"Resolved config path: {config['config_path']}")
-
-        # Initialize manager based on mode
-        try:
-            if not config['dummy_mode'] and HARDWARE_AVAILABLE: 
-                # Initialize hardware
-                self.mdrec = zhinst_demod_recorder(
-                    config['ip'],
-                    devtype=config['device_type']
-                )
-                
-                # Initialize real manager
-                self.manager = MachZehnderManager(
-                    self.mdrec,
-                    config_path=config['config_path'],
-                    lock_check_interval=config['interval']
-                )
-            else:
-                self.manager = DummyMZManager(
-                    lock_check_interval=config['interval']
-                )
-        except Exception as e:
-            QMessageBox.critical(self, "Initialization Error", f"Failed to initialize manager: {str(e)}")
-            sys.exit(1)
-        
-        if self.manager is None:
-            QMessageBox.critical(self, "Error", "Failed to create manager")
-            sys.exit(1)
-        
-        # Initialize visualizer with config path
-        config_path = config.get('config_path')
         self.visualizer = MachZehnderVisualizer(config_path)
-
+        
+        # Create and show GUI
         self._create_widgets()
         self._center_window()
+        self._load_latest_results()
         
-        # Show the main window
         self.show()
         self.raise_()
         self.activateWindow()
@@ -152,17 +70,17 @@ class MZControlGUI(QMainWindow):
         range_calib_btn = QPushButton("Range Calibration")
         range_calib_btn.clicked.connect(self._range_calibration)
         range_layout.addWidget(range_calib_btn)
-        ToolTip(range_calib_btn, "Calibrate the voltage range of the Mach-Zehnder interferometer\nby scanning and finding minimum and maximum transmission points")
+        range_calib_btn.setToolTip("Calibrate the voltage range of the Mach-Zehnder interferometer\nby scanning and finding minimum and maximum transmission points")
         
         vis_btn = QPushButton("Measure Visibility")
         vis_btn.clicked.connect(self._measure_visibility)
         range_layout.addWidget(vis_btn)
-        ToolTip(vis_btn, "Measure the visibility (fringe contrast) of the interferometer\nHigher visibility indicates better interference quality")
+        vis_btn.setToolTip("Measure the visibility (fringe contrast) of the interferometer\nHigher visibility indicates better interference quality")
         
         # Range calibration results
         self.range_label = QLabel("No range calibration")
         range_layout.addWidget(self.range_label)
-        ToolTip(self.range_label, "Shows the calibrated voltage range (Vmin - Vmax)\nThese values define the operating range of the interferometer")
+        self.range_label.setToolTip("Shows the calibrated voltage range (Vmin - Vmax)\nThese values define the operating range of the interferometer")
         
         self.range_time = QLabel("")
         range_layout.addWidget(self.range_time)
@@ -170,7 +88,7 @@ class MZControlGUI(QMainWindow):
         # Visibility results
         self.vis_label = QLabel("No visibility measurement")
         range_layout.addWidget(self.vis_label)
-        ToolTip(self.vis_label, "Visibility value between 0 and 1\nHigher values indicate better fringe contrast and interferometer quality")
+        self.vis_label.setToolTip("Visibility value between 0 and 1\nHigher values indicate better fringe contrast and interferometer quality")
         
         self.vis_time = QLabel("")
         range_layout.addWidget(self.vis_time)
@@ -182,12 +100,12 @@ class MZControlGUI(QMainWindow):
         save_pid_btn = QPushButton("Save PID Config")
         save_pid_btn.clicked.connect(self.manager.save_current_pid_config)
         pid_layout.addWidget(save_pid_btn)
-        ToolTip(save_pid_btn, "Save the current PID controller parameters to file\nThis preserves your tuned settings for future use")
+        save_pid_btn.setToolTip("Save the current PID controller parameters to file\nThis preserves your tuned settings for future use")
         
         load_pid_btn = QPushButton("Load PID Config")
         load_pid_btn.clicked.connect(self._load_pid_config)
         pid_layout.addWidget(load_pid_btn)
-        ToolTip(load_pid_btn, "Load previously saved PID parameters\nThis will overwrite current controller settings")
+        load_pid_btn.setToolTip("Load previously saved PID parameters\nThis will overwrite current controller settings")
         
         # Lock Quality Frame
         lock_frame = QGroupBox("Lock Quality")
@@ -196,11 +114,11 @@ class MZControlGUI(QMainWindow):
         eval_lock_btn = QPushButton("Evaluate Lock")
         eval_lock_btn.clicked.connect(self._evaluate_lock)
         lock_layout.addWidget(eval_lock_btn)
-        ToolTip(eval_lock_btn, "Evaluate the current lock stability and quality\nLower values indicate more stable phase locking")
+        eval_lock_btn.setToolTip("Evaluate the current lock stability and quality\nLower values indicate more stable phase locking")
         
         self.lock_label = QLabel("No measurement")
         lock_layout.addWidget(self.lock_label)
-        ToolTip(self.lock_label, "Lock quality metric: phase standard deviation")
+        self.lock_label.setToolTip("Lock quality metric: phase standard deviation")
         
         self.lock_time = QLabel("")
         lock_layout.addWidget(self.lock_time)
@@ -213,20 +131,20 @@ class MZControlGUI(QMainWindow):
         sp_layout = QHBoxLayout()
         sp_label = QLabel("Setpoint:")
         sp_layout.addWidget(sp_label)
-        ToolTip(sp_label, "Target phase setpoint for the PID controller\nThis is the desired phase value to maintain")
+        sp_label.setToolTip("Target phase setpoint for the PID controller\nThis is the desired phase value to maintain")
         
         # Safe setpoint initialization
         initial_setpoint = getattr(self.manager, 'setpoint', 0.0)
         self.sp_entry = QLineEdit(str(initial_setpoint))
         self.sp_entry.returnPressed.connect(self._update_setpoint)
         sp_layout.addWidget(self.sp_entry)
-        ToolTip(self.sp_entry, "Enter the desired phase setpoint value\nPress Enter to apply the new setpoint")
+        self.sp_entry.setToolTip("Enter the desired phase setpoint value\nPress Enter to apply the new setpoint")
         
         # Auto setpoint button
         auto_sp_btn = QPushButton("Auto")
         auto_sp_btn.clicked.connect(self._auto_setpoint)
         sp_layout.addWidget(auto_sp_btn)
-        ToolTip(auto_sp_btn, "Automatically set setpoint to the middle value\nbetween Vmin and Vmax from range calibration")
+        auto_sp_btn.setToolTip("Automatically set setpoint to the middle value\nbetween Vmin and Vmax from range calibration")
         
         ctrl_layout.addLayout(sp_layout)
         
@@ -237,13 +155,13 @@ class MZControlGUI(QMainWindow):
         self.lock_check = QCheckBox("Enable Lock")
         self.lock_check.stateChanged.connect(self._toggle_lock)
         check_layout.addWidget(self.lock_check)
-        ToolTip(self.lock_check, "Enable/disable the PID lock\nWhen disabled, the phase drifts freely.")
+        self.lock_check.setToolTip("Enable/disable the PID lock\nWhen disabled, the phase drifts freely.")
         
         # Monitoring control
         self.monitor_check = QCheckBox("Monitor Locks")
         self.monitor_check.stateChanged.connect(self._toggle_monitoring)
         check_layout.addWidget(self.monitor_check)
-        ToolTip(self.monitor_check, "Enable/disable continuous monitoring of phase locks\nWhen enabled, the system will automatically check and maintain lock stability")
+        self.monitor_check.setToolTip("Enable/disable continuous monitoring of phase locks\nWhen enabled, the system will automatically check and maintain lock stability")
         
         ctrl_layout.addLayout(check_layout)
         
@@ -254,17 +172,17 @@ class MZControlGUI(QMainWindow):
         plot_range_btn = QPushButton("Plot Range Calibration")
         plot_range_btn.clicked.connect(self._plot_range_calibration)
         vis_layout.addWidget(plot_range_btn)
-        ToolTip(plot_range_btn, "Display the latest range calibration data and fit")
+        plot_range_btn.setToolTip("Display the latest range calibration data and fit")
         
         plot_lock_btn = QPushButton("Plot Lock Performance")
         plot_lock_btn.clicked.connect(self._plot_lock_performance)
         vis_layout.addWidget(plot_lock_btn)
-        ToolTip(plot_lock_btn, "Display the latest lock performance data and fit")
+        plot_lock_btn.setToolTip("Display the latest lock performance data and fit")
         
         plot_combined_btn = QPushButton("Plot Combined Analysis")
         plot_combined_btn.clicked.connect(self._plot_combined_analysis)
         vis_layout.addWidget(plot_combined_btn)
-        ToolTip(plot_combined_btn, "Display both calibration and lock performance plots")
+        plot_combined_btn.setToolTip("Display both calibration and lock performance plots")
         
         # Add all frames to the main layout
         main_layout.addWidget(range_frame, 0, 0)
@@ -273,9 +191,6 @@ class MZControlGUI(QMainWindow):
         main_layout.addWidget(ctrl_frame, 1, 1)
         main_layout.addWidget(vis_frame, 2, 0, 1, 2)
         
-        # Auto-load latest results
-        self._load_latest_results()
-
     def _load_latest_results(self):
         """Automatically load and display the latest available results"""
         try:
@@ -465,11 +380,25 @@ class MZControlGUI(QMainWindow):
             QMessageBox.critical(self, "Plot Error", f"Failed to plot combined analysis: {str(e)}")
             print(f"Debug info - Error details: {str(e)}")  # Added debug info
 
-# Application entry point
+# Modified entry point
 if __name__ == "__main__":
     try:
+        # Add parent directory to Python path (matching cavity_control.py pattern)
+        project_root = str(Path(__file__).parent.parent.parent)  # Go up to useful_codes
+        sys.path.insert(0, project_root)
+        
         app = QApplication(sys.argv)
-        window = MZControlGUI()
+        
+        # Import and use the DummyMZManager instead of defining a local class
+        from experiment_interface.mach_zehnder_utils.dummy_manager import DummyMZManager
+        
+        # Use default config path relative to experiment_interface
+        config_path = os.path.join(project_root, 'experiment_interface', 'config', 'mach_zehnder', 'default_config.yaml')
+        
+        window = MZControlGUI(
+            manager=DummyMZManager(),
+            config_path=config_path
+        )
         sys.exit(app.exec_())
     except Exception as e:
         print(f"Error starting application: {e}")

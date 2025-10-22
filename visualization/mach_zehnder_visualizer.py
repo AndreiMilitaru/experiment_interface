@@ -12,7 +12,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 from typing import Optional, Tuple
-from mach_zehnder_utils.phase_calibration import unlock_model, lock_model, evaluate_visibility
+from ..mach_zehnder_utils.phase_calibration import unlock_model, lock_model, evaluate_visibility
 from .set_axes import set_ax
 
 class MachZehnderVisualizer:
