@@ -314,9 +314,9 @@ class SingleOutput(FunctionGenerator):
     def out_waveform(self, new_wave):
         """
         Setting the waveform of output1.
-        :param new_wave: str, must be in ['sinusoid', 'square', 'ramp', 'pulse', 'noise']
+        :param new_wave: str, must be in ['sin', 'square', 'ramp', 'pulse', 'noise']
         """
-        if new_wave not in ['sinusoid', 'square', 'ramp', 'pulse', 'noise']:
+        if new_wave not in ['sin', 'square', 'ramp', 'pulse', 'noise']:
             raise Exception('Waveform not recognized.')
         else:
             command = 'source:function ' + new_wave
@@ -335,6 +335,12 @@ class SingleOutput(FunctionGenerator):
         else:
             raise Exception('Response not recognized.')
     
+    @out.setter
+    def out(self, value):
+        state = 'ON' if value else 'OFF'
+        command = 'OUTPut ' + state
+        self.send_command(command)
+
     @property
     def sync(self):
         command = 'OUTP:SYNC?'

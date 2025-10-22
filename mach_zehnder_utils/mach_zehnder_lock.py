@@ -12,6 +12,7 @@ import numpy as np
 default_piezo_parameters = [0, 1e3, 0]
 default_laser_parametrs = [-100e-3, -15e-3, 0]
 
+
 def df2tc(freq):
     """
     Convert demodulator bandwidth to time constant for Zurich Instruments lock-in.
