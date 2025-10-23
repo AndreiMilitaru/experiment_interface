@@ -26,7 +26,7 @@ class CavityControlGUI(QMainWindow):
 
     def __init__(self, mdrec=None, fg=None, parent=None, device_id=None,
                   dither_pid=None, dither_drive_demod=None, dither_in_demod=None,
-                  verbose=False, mdrec_lock=None, fg_lock=None):
+                  verbose=False, mdrec_lock=None, fg_lock=None, slow_offset=2):
         """Initialize the GUI with optional verbose mode"""
         super().__init__(parent)
         self.verbose = verbose
@@ -39,14 +39,19 @@ class CavityControlGUI(QMainWindow):
         # Add locks for thread safety
         self.mdrec_lock = mdrec_lock
         self.fg_lock = fg_lock
+        # Add slow offset aux index
+        self.slow_offset = slow_offset
+        # Base offset for slow offset control (set during initialization)
+        self.slow_offset_base = 0.0
 
         # Initialize UI
         self.init_ui()
         
     def init_ui(self):
         """Initialize the user interface"""
-        self.setWindowTitle('Optical Cavity Control')
-        self.setGeometry(100, 100, 800, 600)
+        self.setWindowTitle('Narrow-linewidth cavity control')
+        # Reduce the window width to half (from 800 to 400)
+        self.setGeometry(1085, 250, 350, 500)
 
         # Create central widget and main layout
         central_widget = QWidget()
@@ -227,6 +232,17 @@ class CavityControlGUI(QMainWindow):
             if self.mdrec_lock:
                 self.mdrec_lock.release()
 
+    def get_mdrec_slow_offset(self):
+        """Get slow offset control voltage from mdrec"""
+        if self.mdrec_lock:
+            self.mdrec_lock.acquire()
+        try:
+            response = self.mdrec.lock_in.get(f'/{self.device_id}/auxouts/{self.slow_offset}/offset')
+            return float(response[self.device_id]['auxouts'][str(self.slow_offset)]['offset']['value'][0])
+        finally:
+            if self.mdrec_lock:
+                self.mdrec_lock.release()
+
     def set_initial_values_from_devices(self):
         """Set initial values for widgets from mdrec and fg"""
         if self.mdrec:
@@ -277,6 +293,32 @@ class CavityControlGUI(QMainWindow):
             # Update status indicators after setting values
             self.output_value_label.setText(f"{offset_value:.3f} V")
             self.update_status_indicators()
+            
+            # Add slow offset initialization - read current value from device
+            self.slow_offset_spinbox.blockSignals(True)
+            self.slow_offset_slider.blockSignals(True)
+            self.slow_offset_fine_slider.blockSignals(True)
+            
+            # Read current value directly from device
+            try:
+                slow_offset_value = self.get_mdrec_slow_offset()
+                self.log(f"Initial slow offset value read from device: {slow_offset_value:.3f}V")
+            except Exception as e:
+                # Default to 4.0V if reading fails
+                self.log(f"Failed to read slow offset from device: {e}")
+                slow_offset_value = 4.0
+                
+            self.slow_offset_base = slow_offset_value  # Initialize base value
+            
+            # Set controls with actual value from device
+            self.slow_offset_spinbox.setValue(slow_offset_value)
+            self.slow_offset_slider.setValue(int(slow_offset_value * 100))
+            self.slow_offset_fine_slider.setValue(0)  # Fine adjustment starts at 0
+            self.slow_offset_fine_label.setText("0.0 mV")
+            
+            self.slow_offset_spinbox.blockSignals(False)
+            self.slow_offset_slider.blockSignals(False)
+            self.slow_offset_fine_slider.blockSignals(False)
             
             # Unblock signals after setting values
             self.p_gain_spinbox.blockSignals(False)
@@ -336,8 +378,10 @@ class CavityControlGUI(QMainWindow):
     def create_pid_controls(self):
         """Create PID controller controls"""
         widget = QWidget()
+        
+        # Use a QVBoxLayout to arrange groups vertically
         layout = QVBoxLayout(widget)
-
+        
         # PID Parameters Group
         pid_group = QGroupBox("PID Parameters")
         pid_layout = QGridLayout()
@@ -392,7 +436,46 @@ class CavityControlGUI(QMainWindow):
         pid_group.setLayout(pid_layout)
         layout.addWidget(pid_group)
 
-        # Output Settings Group
+        # Slow Offset Control Group (moved to top priority)
+        slow_offset_group = QGroupBox("Slow Offset Control (Aux3)")
+        slow_offset_layout = QGridLayout()
+        
+        # Slow Offset Voltage - main control
+        slow_offset_layout.addWidget(QLabel("Total Offset (V):"), 0, 0)
+        self.slow_offset_spinbox = QDoubleSpinBox()
+        self.slow_offset_spinbox.setRange(1.5, 6.5)  # Changed range to 1.5V-6.5V
+        self.slow_offset_spinbox.setDecimals(3)
+        self.slow_offset_spinbox.setSingleStep(0.01)
+        self.slow_offset_spinbox.setKeyboardTracking(False)
+        self.slow_offset_spinbox.valueChanged.connect(self.on_slow_offset_changed)
+        slow_offset_layout.addWidget(self.slow_offset_spinbox, 0, 1)
+
+        # Rough adjustment slider
+        self.slow_offset_slider = QSlider(Qt.Horizontal)
+        self.slow_offset_slider.setRange(150, 650)  # 1.5V to 6.5V with 0.01V resolution
+        self.slow_offset_slider.setTickPosition(QSlider.TicksBelow)
+        self.slow_offset_slider.setTickInterval(100)  # Ticks every 1V
+        self.slow_offset_slider.valueChanged.connect(self.on_slow_offset_slider_changed)
+        slow_offset_layout.addWidget(self.slow_offset_slider, 1, 0, 1, 2)
+        
+        # Fine adjustment slider
+        slow_offset_layout.addWidget(QLabel("Fine Adjustment (mV):"), 2, 0)
+        self.slow_offset_fine_slider = QSlider(Qt.Horizontal)
+        self.slow_offset_fine_slider.setRange(-25, 25)  # -25mV to +25mV fine adjustment
+        self.slow_offset_fine_slider.setValue(0)
+        self.slow_offset_fine_slider.setTickPosition(QSlider.TicksBelow)
+        self.slow_offset_fine_slider.setTickInterval(5)  # Ticks every 5mV
+        self.slow_offset_fine_slider.valueChanged.connect(self.on_slow_offset_fine_changed)
+        slow_offset_layout.addWidget(self.slow_offset_fine_slider, 2, 1)
+        
+        # Fine adjustment value display
+        self.slow_offset_fine_label = QLabel("0.0 mV")
+        slow_offset_layout.addWidget(self.slow_offset_fine_label, 3, 1)
+        
+        slow_offset_group.setLayout(slow_offset_layout)
+        layout.addWidget(slow_offset_group)
+        
+        # Output Settings Group (moved below slow offset)
         output_group = QGroupBox("Output Settings")
         output_layout = QGridLayout()
 
@@ -536,7 +619,7 @@ class CavityControlGUI(QMainWindow):
         # Dither Frequency (now in kHz)
         dither_layout.addWidget(QLabel("Frequency (kHz):"), 0, 0)
         self.dither_freq_spinbox = QDoubleSpinBox()
-        self.dither_freq_spinbox.setRange(0.0001, 100.0)  # 0.1 Hz to 100 kHz
+        self.dither_freq_spinbox.setRange(0.0001, 510.0)  # 0.1 Hz to 100 kHz
         self.dither_freq_spinbox.setValue(0.1)  # Default 100 Hz = 0.1 kHz
         self.dither_freq_spinbox.setDecimals(3)
         self.dither_freq_spinbox.setSingleStep(0.1)
@@ -1003,6 +1086,84 @@ class CavityControlGUI(QMainWindow):
                     self.mdrec_lock.release()
             self.output_value_label.setText(f"{total_offset_v:.3f} V")
 
+    # Add event handlers for slow offset control
+    @pyqtSlot(float)
+    def on_slow_offset_changed(self, value):
+        """Handle slow offset value changed event"""
+        if self.mdrec:
+            self.log(f"Slow offset changed to {value:.3f} V")
+            if self.mdrec_lock:
+                self.mdrec_lock.acquire()
+            try:
+                self.mdrec.lock_in.set(f'/{self.device_id}/auxouts/{self.slow_offset}/offset', value)
+            finally:
+                if self.mdrec_lock:
+                    self.mdrec_lock.release()
+            
+            # Calculate the new base offset by removing the fine adjustment
+            fine_offset_v = (self.slow_offset_fine_slider.value() * 0.5) / 1000.0
+            self.slow_offset_base = value - fine_offset_v
+            
+            # Update slider to match new base offset
+            self.slow_offset_slider.blockSignals(True)
+            self.slow_offset_slider.setValue(int(self.slow_offset_base * 100))
+            self.slow_offset_slider.blockSignals(False)
+    
+    @pyqtSlot(int)
+    def on_slow_offset_slider_changed(self, value):
+        """Handle slow offset slider change"""
+        # Convert slider value (150-650) to voltage (1.5V-6.5V)
+        self.slow_offset_base = value / 100.0
+        
+        # Get current fine adjustment in volts
+        fine_offset_v = (self.slow_offset_fine_slider.value() * 0.5) / 1000.0
+        
+        # Calculate total offset
+        total_offset_v = self.slow_offset_base + fine_offset_v
+        
+        # Update spinbox with total value (without triggering valueChanged signal)
+        self.slow_offset_spinbox.blockSignals(True)
+        self.slow_offset_spinbox.setValue(total_offset_v)
+        self.slow_offset_spinbox.blockSignals(False)
+        
+        # Apply to device
+        if self.mdrec:
+            self.log(f"Slow offset slider changed to {total_offset_v:.3f} V")
+            if self.mdrec_lock:
+                self.mdrec_lock.acquire()
+            try:
+                self.mdrec.lock_in.set(f'/{self.device_id}/auxouts/{self.slow_offset}/offset', total_offset_v)
+            finally:
+                if self.mdrec_lock:
+                    self.mdrec_lock.release()
+    
+    @pyqtSlot(int)
+    def on_slow_offset_fine_changed(self, value):
+        """Handle slow offset fine slider change"""
+        # Each step is 0.5mV
+        fine_offset_mv = value * 0.5
+        self.slow_offset_fine_label.setText(f"{fine_offset_mv:+.1f} mV")
+        
+        # Calculate total offset
+        fine_offset_v = fine_offset_mv / 1000.0  # Convert mV to V
+        total_offset_v = self.slow_offset_base + fine_offset_v
+        
+        # Update spinbox with total value
+        self.slow_offset_spinbox.blockSignals(True)
+        self.slow_offset_spinbox.setValue(total_offset_v)
+        self.slow_offset_spinbox.blockSignals(False)
+        
+        # Apply to device
+        if self.mdrec:
+            self.log(f"Fine adjustment: {fine_offset_mv:+.1f} mV, total slow offset: {total_offset_v:.3f} V")
+            if self.mdrec_lock:
+                self.mdrec_lock.acquire()
+            try:
+                self.mdrec.lock_in.set(f'/{self.device_id}/auxouts/{self.slow_offset}/offset', total_offset_v)
+            finally:
+                if self.mdrec_lock:
+                    self.mdrec_lock.release()
+
     def log(self, message):
         """Log message if verbose mode is enabled"""
         if self.verbose:
@@ -1010,15 +1171,16 @@ class CavityControlGUI(QMainWindow):
 
 
 # Example usage:
-def main(mdrec=None, fg=None, device_id=None, dither_pid=None, dither_drive_demod=None, dither_in_demod=None, verbose=False, mdrec_lock=None, fg_lock=None):
+def main(mdrec=None, fg=None, device_id=None, dither_pid=None, dither_drive_demod=None, 
+         dither_in_demod=None, verbose=False, mdrec_lock=None, fg_lock=None, slow_offset=2):
+    """Main function to run the Cavity Control GUI"""
     app = QApplication(sys.argv)
-    # Set app style for consistent appearance across platforms
     app.setStyle("Fusion")
     
-    # Passing locks to the GUI
     window = CavityControlGUI(mdrec=mdrec, fg=fg, device_id=device_id, dither_pid=dither_pid,
                               dither_drive_demod=dither_drive_demod, dither_in_demod=dither_in_demod,
-                              verbose=verbose, mdrec_lock=mdrec_lock, fg_lock=fg_lock)
+                              verbose=verbose, mdrec_lock=mdrec_lock, fg_lock=fg_lock, 
+                              slow_offset=slow_offset)
     window.show()
     sys.exit(app.exec_())
 
@@ -1035,7 +1197,8 @@ if __name__ == "__main__":
     pid_dither = 1
     dither_drive_demod = 2
     dither_in_demod = 3
-
+    slow_offset = 2  # auxout2 corresponds to Aux3 on device
+    
     # Use VISA resource string for function generator
     visa_resource_fg = f"TCPIP0::{ip_fg}::inst0::INSTR"
 
@@ -1056,4 +1219,5 @@ if __name__ == "__main__":
 
     main(mdrec=mdrec, fg=fg, device_id=device_id, dither_pid=pid_dither,    
          dither_drive_demod=dither_drive_demod, dither_in_demod=dither_in_demod,
-         verbose=False, mdrec_lock=mdrec_lock, fg_lock=fg_lock)
+         verbose=False, mdrec_lock=mdrec_lock, fg_lock=fg_lock, 
+         slow_offset=slow_offset)
