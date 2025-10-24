@@ -70,6 +70,28 @@ class CavityControlGUI(QMainWindow):
         # Set initial values from devices
         self.set_initial_values_from_devices()
 
+    def pid_output_value(self):
+        """Get current PID output value from mdrec"""
+        if self.mdrec_lock:
+            self.mdrec_lock.acquire()
+        try:
+            return self.mdrec.lock_in.get(f'/{self.device_id}/pids/{self.dither_pid}/value')
+        finally:
+            self.mdrec_lock.release()
+
+    def recenter_PID_output(self):
+        """Recenter PID range around the current output value"""
+        current_output = self.get_mdrec_output_offset()
+        if self.mdrec_lock:
+            self.mdrec_lock.acquire()
+        try:
+            self.mdrec.lock_in.set(f'/{self.device_id}/pids/{self.dither_pid}/center', current_output)
+            self.mdrec.lock_in.set(f'/{self.device_id}/pids/{self.dither_pid}/limitlower', -current_output)
+            self.mdrec.lock_in.set(f'/{self.device_id}/pids/{self.dither_pid}/limitupper', 10.0 - current_output)
+        finally:
+            if self.mdrec_lock:
+                self.mdrec_lock.release()
+
     def get_mdrec_p_gain(self):
         """Get P gain from mdrec"""
         if self.mdrec_lock:
@@ -421,17 +443,28 @@ class CavityControlGUI(QMainWindow):
 
         # PID Enable
         pid_layout.addWidget(QLabel("PID Enable:"), 3, 0)
+        pid_enable_layout = QHBoxLayout()
         self.pid_enable_checkbox = QCheckBox()
         self.pid_enable_checkbox.setChecked(False)
         self.pid_enable_checkbox.stateChanged.connect(self.on_pid_enable_changed)
-        pid_layout.addWidget(self.pid_enable_checkbox, 3, 1)
+        pid_enable_layout.addWidget(self.pid_enable_checkbox)
+        pid_enable_layout.addStretch()
+        pid_layout.addLayout(pid_enable_layout, 3, 1)
 
         # Keep I Value
         pid_layout.addWidget(QLabel("Keep I Value:"), 4, 0)
+        keep_i_layout = QHBoxLayout()
         self.keep_i_checkbox = QCheckBox()
         self.keep_i_checkbox.setChecked(True)
         self.keep_i_checkbox.stateChanged.connect(self.on_keep_i_changed)
-        pid_layout.addWidget(self.keep_i_checkbox, 4, 1)
+        keep_i_layout.addWidget(self.keep_i_checkbox)
+        keep_i_layout.addStretch()
+        pid_layout.addLayout(keep_i_layout, 4, 1)
+
+        # Recenter PID button
+        self.recenter_pid_button = QPushButton("Recenter PID")
+        self.recenter_pid_button.clicked.connect(self.recenter_PID_output)
+        pid_layout.addWidget(self.recenter_pid_button, 4, 2, 1, 1)
 
         pid_group.setLayout(pid_layout)
         layout.addWidget(pid_group)
@@ -833,6 +866,12 @@ class CavityControlGUI(QMainWindow):
         enabled = state == Qt.Checked
         if self.mdrec:
             self.log(f"PID enable changed to {enabled}")
+            
+            # If enabling PID, recenter the PID output first
+            if enabled:
+                self.log("Recentering PID output before enabling PID")
+                self.recenter_PID_output()
+            
             if self.mdrec_lock:
                 self.mdrec_lock.acquire()
             try:
@@ -843,16 +882,39 @@ class CavityControlGUI(QMainWindow):
         self.update_offset_spinbox_state()
         self.update_status_indicators()
         if not enabled and self.mdrec:
-            # When disabling PID, set output offset to current offset spinbox value
-            offset_value = self.offset_spinbox.value()
-            self.log(f"Setting output offset to {offset_value} V on PID disable")
+            # When disabling PID, read current offset from device and update controls
             if self.mdrec_lock:
                 self.mdrec_lock.acquire()
             try:
-                offset_value = self.mdrec.lock_in.get(f'/{self.device_id}/sigouts/0/offset')
+                response = self.mdrec.lock_in.get(f'/{self.device_id}/sigouts/0/offset')
+                offset_value = float(response[self.device_id]['sigouts']['0']['offset']['value'][0])
             finally:
                 if self.mdrec_lock:
                     self.mdrec_lock.release()
+            
+            self.log(f"Setting output offset to {offset_value:.3f} V on PID disable")
+            
+            # Reset fine offset slider to 0
+            self.fine_offset_slider.blockSignals(True)
+            self.fine_offset_slider.setValue(0)
+            self.fine_offset_label.setText("0.0 mV")
+            self.fine_offset_slider.blockSignals(False)
+            
+            # Set base offset to the current device value
+            self.base_offset = offset_value
+            
+            # Update spinbox to show current offset
+            self.offset_spinbox.blockSignals(True)
+            self.offset_spinbox.setValue(offset_value)
+            self.offset_spinbox.blockSignals(False)
+            
+            # Update slider to match base offset
+            self.offset_slider.blockSignals(True)
+            self.offset_slider.setValue(int(offset_value * 100))
+            self.offset_slider.blockSignals(False)
+            
+            # Update status display
+            self.output_value_label.setText(f"{offset_value:.3f} V")
 
     @pyqtSlot(int)
     def on_keep_i_changed(self, state):
