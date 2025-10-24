@@ -1115,6 +1115,7 @@ class CavityControlGUI(QMainWindow):
                 self.fg_lock.acquire()
             try:
                 self.fg.out = enabled
+                self.mdrec.lock_in.set(f'/{self.device_id}/sigouts/0/add', 1 if enabled else 0)
             finally:
                 if self.fg_lock:
                     self.fg_lock.release()
