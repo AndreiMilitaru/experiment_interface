@@ -278,6 +278,7 @@ class CavityControlGUI(QMainWindow):
             self.dither_freq_spinbox.blockSignals(True)
             self.dither_strength_spinbox.blockSignals(True)
             self.demod_phase_spinbox.blockSignals(True)
+            self.dither_enable_checkbox.blockSignals(True)  # Added
             
             # Set values
             self.p_gain_spinbox.setValue(self.get_mdrec_p_gain())
@@ -285,6 +286,12 @@ class CavityControlGUI(QMainWindow):
             self.bandwidth_spinbox.setValue(self.get_mdrec_bandwidth())
             self.pid_enable_checkbox.setChecked(self.get_mdrec_pid_enabled())
             self.keep_i_checkbox.setChecked(self.get_mdrec_keep_i())
+            
+            # Set dither and demodulation values
+            self.dither_freq_spinbox.setValue(self.get_mdrec_dither_freq())
+            self.dither_strength_spinbox.setValue(self.get_mdrec_dither_strength() * 1000.0)  # Convert V to mV
+            self.demod_phase_spinbox.setValue(self.get_mdrec_demod_phase())
+            self.dither_enable_checkbox.setChecked(self.get_mdrec_dither_enable())
             
             # Get offset value first and block signals
             self.offset_spinbox.blockSignals(True)
@@ -352,6 +359,7 @@ class CavityControlGUI(QMainWindow):
             self.dither_freq_spinbox.blockSignals(False)
             self.dither_strength_spinbox.blockSignals(False)
             self.demod_phase_spinbox.blockSignals(False)
+            self.dither_enable_checkbox.blockSignals(False)  # Added
             
         if self.fg:
             # Block signals for FG controls
@@ -360,12 +368,36 @@ class CavityControlGUI(QMainWindow):
             self.freq_spinbox.blockSignals(True)
             self.fg_offset_spinbox.blockSignals(True)
             self.output_checkbox.blockSignals(True)
+            self.amplitude_fine_slider.blockSignals(True)  # Added
             
             # Set values
-            self.waveform_combo.setCurrentText(self.get_fg_waveform())
-            self.amplitude_spinbox.setValue(self.get_fg_amplitude())
+            waveform = self.get_fg_waveform()
+            self.log(f"Read waveform from FG: '{waveform}'")
+            
+            # Find matching waveform in combo box
+            index = -1
+            for i, wf in enumerate(self.WAVEFORMS):
+                if wf.lower() == waveform.lower():
+                    index = i
+                    break
+            
+            if index >= 0:
+                self.waveform_combo.setCurrentIndex(index)
+            else:
+                self.log(f"Warning: Waveform '{waveform}' not found in list, defaulting to first option")
+                self.waveform_combo.setCurrentIndex(0)
+            
+            amplitude_mv = self.get_fg_amplitude()
+            self.amplitude_spinbox.setValue(amplitude_mv)
+            self.amplitude_fine_slider.setValue(0)  # Reset fine adjustment to 0
+            self.amplitude_fine_label.setText("0 mV")
+            
             self.freq_spinbox.setValue(self.get_fg_frequency())
-            self.fg_offset_spinbox.setValue(self.get_fg_offset())
+            
+            # Calculate offset from amplitude (should be amplitude/2)
+            offset_mv = amplitude_mv / 2.0
+            self.fg_offset_spinbox.setValue(offset_mv)
+            
             self.output_checkbox.setChecked(self.get_fg_output_enabled())
             
             # Unblock signals
@@ -374,6 +406,7 @@ class CavityControlGUI(QMainWindow):
             self.freq_spinbox.blockSignals(False)
             self.fg_offset_spinbox.blockSignals(False)
             self.output_checkbox.blockSignals(False)
+            self.amplitude_fine_slider.blockSignals(False)  # Added
 
         # Initialize fine offset slider to 0
         self.fine_offset_slider.blockSignals(True)
@@ -461,11 +494,6 @@ class CavityControlGUI(QMainWindow):
         keep_i_layout.addStretch()
         pid_layout.addLayout(keep_i_layout, 4, 1)
 
-        # Recenter PID button
-        self.recenter_pid_button = QPushButton("Recenter PID")
-        self.recenter_pid_button.clicked.connect(self.recenter_PID_output)
-        pid_layout.addWidget(self.recenter_pid_button, 4, 2, 1, 1)
-
         pid_group.setLayout(pid_layout)
         layout.addWidget(pid_group)
 
@@ -515,19 +543,19 @@ class CavityControlGUI(QMainWindow):
         # Output Signal Offset (now shows total including fine adjustment)
         output_layout.addWidget(QLabel("Total Output (V):"), 0, 0)
         self.offset_spinbox = QDoubleSpinBox()
-        self.offset_spinbox.setRange(0, 5.0)
-        # Default to 2V instead of 0V for better starting point
-        self.offset_spinbox.setValue(2.0)
+        self.offset_spinbox.setRange(0, 1.0)  # Changed from 5.0 to 1.0
+        # Default to 0.5V instead of 2V for better starting point in new range
+        self.offset_spinbox.setValue(0.5)
         self.offset_spinbox.setDecimals(3)
         self.offset_spinbox.setSingleStep(0.01)
-        self.offset_spinbox.setKeyboardTracking(False)  # Only update when Enter is pressed
+        self.offset_spinbox.setKeyboardTracking(False)
         self.offset_spinbox.valueChanged.connect(self.on_offset_changed)
         output_layout.addWidget(self.offset_spinbox, 0, 1)
 
-        # Add a slider for visual control of offset - update range to match 0-5V
+        # Add a slider for visual control of offset 
         self.offset_slider = QSlider(Qt.Horizontal)
-        self.offset_slider.setRange(0, 500)  # 0-5V with 0.01V resolution
-        self.offset_slider.setValue(200)  # Default to 2.0V (matching spinbox)
+        self.offset_slider.setRange(0, 100)  # Changed from 500 to 100 for 0-1V with 0.01V resolution
+        self.offset_slider.setValue(50)  # Default to 0.5V (matching spinbox)
         self.offset_slider.valueChanged.connect(self.on_offset_slider_changed)
         output_layout.addWidget(self.offset_slider, 1, 0, 1, 2)
 
@@ -546,7 +574,7 @@ class CavityControlGUI(QMainWindow):
         output_layout.addWidget(self.fine_offset_label, 3, 1)
         
         # Store the base offset (without fine adjustment) as an instance variable
-        self.base_offset = 2.0  # Default to 2.0V
+        self.base_offset = 0.5  # Default to 0.5V instead of 2.0V
 
         # Remove the separate Total Output display since spinbox now shows total
 
@@ -789,8 +817,8 @@ class CavityControlGUI(QMainWindow):
     @pyqtSlot(int)
     def on_offset_slider_changed(self, value):
         """Handle offset slider change"""
-        # Convert slider value (0-500) to voltage (0-5V) - this is the new base offset
-        self.base_offset = value / 100.0
+        # Convert slider value (0-100) to voltage (0-1V) - this is the new base offset
+        self.base_offset = value / 100.0  # Changed from /100.0 to match new range
         
         # Get current fine adjustment in volts
         fine_offset_v = (self.fine_offset_slider.value() * 0.5) / 1000.0
