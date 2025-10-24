@@ -87,7 +87,7 @@ class CavityControlGUI(QMainWindow):
         try:
             self.mdrec.lock_in.set(f'/{self.device_id}/pids/{self.dither_pid}/center', current_output)
             self.mdrec.lock_in.set(f'/{self.device_id}/pids/{self.dither_pid}/limitlower', -current_output)
-            self.mdrec.lock_in.set(f'/{self.device_id}/pids/{self.dither_pid}/limitupper', 10.0 - current_output)
+            self.mdrec.lock_in.set(f'/{self.device_id}/pids/{self.dither_pid}/limitupper', 1.0 - current_output)
         finally:
             if self.mdrec_lock:
                 self.mdrec_lock.release()
