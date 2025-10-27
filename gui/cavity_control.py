@@ -8,14 +8,18 @@ demodulation recorder and function generator.
 """
 
 import sys
+import numpy as np
+import time
+import threading
 from experiment_interface.mach_zehnder_utils.mach_zehnder_lock import df2tc
+from experiment_interface.zhinst_utils.scope_settings import get_data_scope
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QLabel, QDoubleSpinBox, QCheckBox, QComboBox, QPushButton,
     QGroupBox, QGridLayout, QFrame, QSizePolicy, QTabWidget,
     QSlider
 )
-from PyQt5.QtCore import Qt, pyqtSlot
+from PyQt5.QtCore import Qt, pyqtSlot, pyqtSignal, QObject
 from PyQt5.QtGui import QFont, QIcon
 
 
@@ -43,6 +47,15 @@ class CavityControlGUI(QMainWindow):
         self.slow_offset = slow_offset
         # Base offset for slow offset control (set during initialization)
         self.slow_offset_base = 0.0
+        
+        # Initialize reflection monitoring thread control
+        self.reflection_thread = None
+        self.reflection_thread_running = False
+        
+        # Initialize auto-offset management thread control
+        self.auto_offset_thread = None
+        self.auto_offset_thread_running = False
+        self.ramping_in_progress = False
 
         # Initialize UI
         self.init_ui()
@@ -483,6 +496,20 @@ class CavityControlGUI(QMainWindow):
         pid_enable_layout.addWidget(self.pid_enable_checkbox)
         pid_enable_layout.addStretch()
         pid_layout.addLayout(pid_enable_layout, 3, 1)
+        
+        # Auto Offset Management checkbox
+        pid_layout.addWidget(QLabel("Offset adjustment:"), 3, 2)
+        self.auto_offset_checkbox = QCheckBox()
+        self.auto_offset_checkbox.setChecked(False)
+        self.auto_offset_checkbox.stateChanged.connect(self.on_auto_offset_changed)
+        pid_layout.addWidget(self.auto_offset_checkbox, 3, 3)
+        
+        # Monitor reflection checkbox
+        pid_layout.addWidget(QLabel("Monitor Reflection:"), 4, 2)
+        self.monitor_reflection_checkbox = QCheckBox()
+        self.monitor_reflection_checkbox.setChecked(False)
+        self.monitor_reflection_checkbox.stateChanged.connect(self.on_monitor_reflection_changed)
+        pid_layout.addWidget(self.monitor_reflection_checkbox, 4, 3)
 
         # Keep I Value
         pid_layout.addWidget(QLabel("Keep I Value:"), 4, 0)
@@ -762,6 +789,15 @@ class CavityControlGUI(QMainWindow):
         self.dither_status_label = QLabel("Enabled")
         self.dither_status_label.setStyleSheet("color: green;")
         layout.addWidget(self.dither_status_label, 1, 3)
+        
+        # Add reflection signal monitoring
+        layout.addWidget(QLabel("Reflection Signal:"), 2, 0)
+        self.reflection_label = QLabel("--- V")
+        layout.addWidget(self.reflection_label, 2, 1)
+        # Add offset adjustment status
+        layout.addWidget(QLabel("Offset adjustment Status:"), 2, 2)
+        self.auto_offset_status_label = QLabel("Idle")
+        layout.addWidget(self.auto_offset_status_label, 2, 3)
         
         # Add spacer item to push status labels to the left
         layout.setColumnStretch(4, 1)
@@ -1255,6 +1291,246 @@ class CavityControlGUI(QMainWindow):
                 if self.mdrec_lock:
                     self.mdrec_lock.release()
 
+    @pyqtSlot(int)
+    def on_monitor_reflection_changed(self, state):
+        """Handle monitor reflection checkbox state change"""
+        enabled = state == Qt.Checked
+        if enabled:
+            self.start_reflection_monitoring()
+        else:
+            self.stop_reflection_monitoring()
+    
+    @pyqtSlot(int)
+    def on_auto_offset_changed(self, state):
+        """Handle auto offset management checkbox state change"""
+        enabled = state == Qt.Checked
+        if enabled:
+            self.start_auto_offset_management()
+        else:
+            self.stop_auto_offset_management()
+    
+    def start_auto_offset_management(self):
+        """Start the background thread for automatic offset management"""
+        if not self.auto_offset_thread_running:
+            self.auto_offset_thread_running = True
+            self.auto_offset_thread = threading.Thread(target=self._auto_offset_loop, daemon=True)
+            self.auto_offset_thread.start()
+            self.log("Auto offset management started")
+    
+    def stop_auto_offset_management(self):
+        """Stop the background thread for automatic offset management"""
+        if self.auto_offset_thread_running:
+            self.auto_offset_thread_running = False
+            if self.auto_offset_thread:
+                self.auto_offset_thread.join(timeout=3.0)
+            self.auto_offset_status_label.setText("Idle")
+            self.log("Auto offset management stopped")
+    
+    def _auto_offset_loop(self):
+        """Background thread loop to monitor and adjust offset"""
+        while self.auto_offset_thread_running:
+            try:
+                # Get current output offset
+                current_offset = self.get_mdrec_output_offset()
+                
+                # Check if ramping is needed
+                if current_offset < 0.05:
+                    self.log(f"Output offset {current_offset:.3f}V below threshold, starting ramp up")
+                    self._ramp_slow_offset(direction='up')
+                elif current_offset > 0.95:
+                    self.log(f"Output offset {current_offset:.3f}V above threshold, starting ramp down")
+                    self._ramp_slow_offset(direction='down')
+                else:
+                    self.auto_offset_status_label.setText(f"Monitoring")
+                
+            except Exception as e:
+                self.log(f"Error in auto offset management: {e}")
+                self.auto_offset_status_label.setText("Error")
+            
+            # Sleep for 1 second, but check frequently if we should stop
+            for _ in range(10):
+                if not self.auto_offset_thread_running:
+                    break
+                time.sleep(0.1)
+    
+    def _ramp_slow_offset(self, direction='up'):
+        """Ramp the slow offset up or down by 15mV in 1mV steps"""
+        if self.ramping_in_progress:
+            return  # Prevent multiple ramps at once
+        
+        self.ramping_in_progress = True
+        
+        # Block slow offset controls
+        self.slow_offset_spinbox.setEnabled(False)
+        self.slow_offset_slider.setEnabled(False)
+        self.slow_offset_fine_slider.setEnabled(False)
+        self.slow_offset_spinbox.setStyleSheet("background-color: #d0d0d0;")
+        self.slow_offset_slider.setStyleSheet("background-color: #d0d0d0;")
+        self.slow_offset_fine_slider.setStyleSheet("background-color: #d0d0d0;")
+        
+        step = 0.001  # 1mV step
+        if direction == 'down':
+            step = -step
+        
+        # Perform 15 steps
+        for i in range(15):
+            if not self.auto_offset_thread_running:
+                break
+            
+            # Get current slow offset
+            current_slow = self.get_mdrec_slow_offset()
+            new_slow = current_slow + step
+            
+            # Ensure we stay within valid range
+            new_slow = max(1.5, min(6.5, new_slow))
+            
+            # Update slow offset
+            if self.mdrec_lock:
+                self.mdrec_lock.acquire()
+            try:
+                self.mdrec.lock_in.set(f'/{self.device_id}/auxouts/{self.slow_offset}/offset', new_slow)
+            finally:
+                if self.mdrec_lock:
+                    self.mdrec_lock.release()
+            
+            # Update GUI
+            self.slow_offset_spinbox.blockSignals(True)
+            self.slow_offset_spinbox.setValue(new_slow)
+            self.slow_offset_spinbox.blockSignals(False)
+            
+            self.slow_offset_slider.blockSignals(True)
+            self.slow_offset_slider.setValue(int(new_slow * 100))
+            self.slow_offset_slider.blockSignals(False)
+            
+            # Update base offset
+            self.slow_offset_base = new_slow
+            
+            # Update status
+            direction_text = "up" if direction == 'up' else "down"
+            self.auto_offset_status_label.setText(f"Ramping {direction_text}: {new_slow:.3f}V (step {i+1}/15)")
+            self.log(f"Ramping {direction_text}: step {i+1}/15, slow_offset = {new_slow:.3f}V")
+            
+            # Wait 1 second before next step
+            time.sleep(1.0)
+        
+        # Unblock slow offset controls
+        self.slow_offset_spinbox.setEnabled(True)
+        self.slow_offset_slider.setEnabled(True)
+        self.slow_offset_fine_slider.setEnabled(True)
+        self.slow_offset_spinbox.setStyleSheet("")
+        self.slow_offset_slider.setStyleSheet("")
+        self.slow_offset_fine_slider.setStyleSheet("")
+        
+        self.ramping_in_progress = False
+        self.auto_offset_status_label.setText("Ramp complete, monitoring...")
+        self.log(f"Ramping {direction} complete")
+    
+    def start_reflection_monitoring(self):
+        """Start the background thread for reflection monitoring"""
+        if not self.reflection_thread_running:
+            self.reflection_thread_running = True
+            self.reflection_thread = threading.Thread(target=self._reflection_monitor_loop, daemon=True)
+            self.reflection_thread.start()
+            self.log("Reflection monitoring started")
+    
+    def stop_reflection_monitoring(self):
+        """Stop the background thread for reflection monitoring"""
+        if self.reflection_thread_running:
+            self.reflection_thread_running = False
+            if self.reflection_thread:
+                self.reflection_thread.join(timeout=3.0)
+            self.log("Reflection monitoring stopped")
+    
+    def _reflection_monitor_loop(self):
+        """Background thread loop to monitor reflection signal"""
+        while self.reflection_thread_running:
+            try:
+                mean_val, std_val = self.get_average_reflection()
+                # Update GUI label - safe because we're just setting text
+                if np.abs(mean_val) < 1:
+                    self.reflection_label.setText(f"{mean_val/1e-3:.3f} ± {std_val/1e-3:.3f} mV")
+                else: 
+                    self.reflection_label.setText(f"{mean_val:.3f} ± {std_val:.3f} V")
+            except Exception as e:
+                self.log(f"Error reading reflection: {e}")
+                self.reflection_label.setText("Error")
+            
+            # Sleep for 2 seconds, but check frequently if we should stop
+            for _ in range(10):  # Check every 0.1s for 2 seconds total
+                if not self.reflection_thread_running:
+                    break
+                time.sleep(0.1)
+    
+    def closeEvent(self, event):
+        """Handle window close event to clean up threads"""
+        self.stop_reflection_monitoring()
+        self.stop_auto_offset_management()
+        event.accept()
+
+    def get_average_reflection(self):
+        """Get average reflection signal from the device"""
+        if self.mdrec:
+            # Don't acquire lock here - read_scope_data will handle it
+            wave, dt = self.read_scope_data()
+            return np.mean(wave), np.std(wave)
+
+    def read_scope_data(self, length=4096, inputselect=9, sampling=9):
+        """Read and log current scope data from the device"""
+        if self.mdrec:
+            if self.mdrec_lock:
+                settings = self.read_scope_settings() # Save current settings
+                self.mdrec_lock.acquire()
+            try:
+                self.mdrec.lock_in.set(f'/{self.device_id}/scopes/0/time', sampling)
+                self.mdrec.lock_in.set(f'/{self.device_id}/scopes/0/length', length)
+                self.mdrec.lock_in.set(f'/{self.device_id}/scopes/0/channels/0/inputselect', inputselect)
+                data = get_data_scope(self.mdrec, self.device_id)
+                dt = data[f'/{self.device_id}/scopes/0/wave'][-1][0]['dt']
+                wave = data[f'/{self.device_id}/scopes/0/wave'][-1][0]['wave'][0]
+            finally:
+                # Restore previous settings
+                if self.mdrec_lock:
+                    self.mdrec_lock.release()
+                    self.set_scope_settings(settings)  # Restore previous settings
+            return wave, dt
+
+    def read_scope_settings(self):
+        """Read and log current scope settings from the device"""
+        if self.mdrec:
+            if self.mdrec_lock:
+                self.mdrec_lock.acquire()
+            try:
+                sampling = self.mdrec.lock_in.getInt(f'/{self.device_id}/scopes/0/time')
+                length = self.mdrec.lock_in.getInt(f'/{self.device_id}/scopes/0/length')
+                inputselect = self.mdrec.lock_in.getInt(f'/{self.device_id}/scopes/0/channels/0/inputselect')
+                settings = {
+                    'sampling': sampling,
+                    'length': length,
+                    'inputselect': inputselect
+                }
+                self.log(f"Scope settings: {settings}")
+                return settings
+            finally:
+                if self.mdrec_lock:
+                    self.mdrec_lock.release()
+
+    def set_scope_settings(self, settings):
+        """Set scope settings on the device"""
+        if self.mdrec:
+            if self.mdrec_lock:
+                self.mdrec_lock.acquire()
+            try:
+                if 'sampling' in settings.keys():
+                    self.mdrec.lock_in.setInt(f'/{self.device_id}/scopes/0/time', settings['sampling'])
+                if 'length' in settings.keys():
+                    self.mdrec.lock_in.setInt(f'/{self.device_id}/scopes/0/length', settings['length'])
+                if 'inputselect' in settings.keys():
+                    self.mdrec.lock_in.setInt(f'/{self.device_id}/scopes/0/channels/0/inputselect', settings['inputselect'])
+                self.log(f"Scope settings updated to: {settings}")
+            finally:
+                if self.mdrec_lock:
+                    self.mdrec_lock.release()
+
     def log(self, message):
         """Log message if verbose mode is enabled"""
         if self.verbose:
@@ -1280,6 +1556,8 @@ if __name__ == "__main__":
     from experiment_interface.zhinst_utils.demodulation_recorder import zhinst_demod_recorder
     from experiment_interface.control.device.function_generator import SingleOutput
     import threading
+
+    verbose = False
 
     ip_PC = '10.21.217.191'
     ip_fg = '10.21.217.150'
@@ -1310,5 +1588,5 @@ if __name__ == "__main__":
 
     main(mdrec=mdrec, fg=fg, device_id=device_id, dither_pid=pid_dither,    
          dither_drive_demod=dither_drive_demod, dither_in_demod=dither_in_demod,
-         verbose=False, mdrec_lock=mdrec_lock, fg_lock=fg_lock, 
+         verbose=verbose, mdrec_lock=mdrec_lock, fg_lock=fg_lock, 
          slow_offset=slow_offset)

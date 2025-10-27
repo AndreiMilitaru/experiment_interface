@@ -125,7 +125,7 @@ def config_scope_module(zidrec, mode, averages=1, history=0):
     zidrec.scope.set('fft/window', 1)  # 1=Hann
 
 
-def get_data_scope(zidrec, dev, num_records=1, timeout=300, verbose=False):
+def get_data_scope(zidrec, dev, num_records=1, timeout=300, verbose=False, disable_when_done=False):
     """Acquire data from scope.
 
     Parameters
@@ -146,6 +146,7 @@ def get_data_scope(zidrec, dev, num_records=1, timeout=300, verbose=False):
     dict
         Dictionary containing acquired scope data
     """
+    zidrec.scope = zidrec.lock_in.scopeModule()  # Initialize scope module if not already done
     zidrec.scope.set('averager/restart', 1)
     zidrec.scope.subscribe('/{:s}/scopes/0/wave'.format(dev))
     # get_scope_records
@@ -156,7 +157,7 @@ def get_data_scope(zidrec, dev, num_records=1, timeout=300, verbose=False):
     records = 0
     progress = 0
     while (records < num_records) or (progress < 1.0):
-        time.sleep(0.5)
+        time.sleep(0.1)
         records = zidrec.scope.getInt('records')
         progress = zidrec.scope.progress()[0]
         if verbose:
@@ -165,8 +166,9 @@ def get_data_scope(zidrec, dev, num_records=1, timeout=300, verbose=False):
                 f"Progress of current segment {100.0 * progress}%.",
                 end="\r",
             )
-
-    zidrec.lock_in.setInt('/{:s}/scopes/0/enable'.format(dev), 0)
+    if disable_when_done:
+        zidrec.lock_in.setInt('/{:s}/scopes/0/enable'.format(dev), 0)
+        
     data = zidrec.scope.read(True)
     zidrec.scope.finish()
     return data
