@@ -5,19 +5,25 @@ Organization: Institute of Science and Technology Austria (ISTA)
 Date: October 2025
 Description: GUI for controlling narrow-linewidth optical cavity with 
 demodulation recorder and function generator.
+Values that work well with the offset adjustment routine, as of 29th October 2025, are
+-- PID, p gain 1500 and I gain 1000, with bandwidth 50Hz. 
+-- function generator 40mV amplitude and 5Hz frequency (with option keep_offset_zero enabled)
+-- dither tone 500kHz and 5mV strength, with 0 phase shift.
 """
 
 import sys
 import numpy as np
 import time
 import threading
+import peakutils
+from datetime import datetime
 from experiment_interface.mach_zehnder_utils.mach_zehnder_lock import df2tc
 from experiment_interface.zhinst_utils.scope_settings import get_data_scope
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QLabel, QDoubleSpinBox, QCheckBox, QComboBox, QPushButton,
     QGroupBox, QGridLayout, QFrame, QSizePolicy, QTabWidget,
-    QSlider
+    QSlider, QTextEdit
 )
 from PyQt5.QtCore import Qt, pyqtSlot, pyqtSignal, QObject
 from PyQt5.QtGui import QFont, QIcon
@@ -30,7 +36,9 @@ class CavityControlGUI(QMainWindow):
 
     def __init__(self, mdrec=None, fg=None, parent=None, device_id=None,
                   dither_pid=None, dither_drive_demod=None, dither_in_demod=None,
-                  verbose=False, mdrec_lock=None, fg_lock=None, slow_offset=2):
+                  verbose=False, mdrec_lock=None, fg_lock=None, slow_offset=2,
+                  keep_offset_zero=True, mode_finding_settings=None, mid_baseline_threshold=2.0,
+                  locked_reflection_threshold=2.0):
         """Initialize the GUI with optional verbose mode"""
         super().__init__(parent)
         self.verbose = verbose
@@ -47,6 +55,8 @@ class CavityControlGUI(QMainWindow):
         self.slow_offset = slow_offset
         # Base offset for slow offset control (set during initialization)
         self.slow_offset_base = 0.0
+        self.keep_offset_zero = keep_offset_zero
+        self.locked_reflection_threshold = locked_reflection_threshold
         
         # Initialize reflection monitoring thread control
         self.reflection_thread = None
@@ -57,6 +67,12 @@ class CavityControlGUI(QMainWindow):
         self.auto_offset_thread_running = False
         self.ramping_in_progress = False
 
+        # Initialize auto mode finder thread control
+        self.auto_mode_finder_thread = None
+        self.auto_mode_finder_thread_running = False
+
+        self.mode_finding_settings = mode_finding_settings
+        self.mid_baseline_threshold = mid_baseline_threshold
         # Initialize UI
         self.init_ui()
         
@@ -64,19 +80,21 @@ class CavityControlGUI(QMainWindow):
         """Initialize the user interface"""
         self.setWindowTitle('Narrow-linewidth cavity control')
         # Reduce the window width to half (from 800 to 400)
-        self.setGeometry(1085, 250, 350, 500)
+        self.setGeometry(1050, 200, 350, 500)
 
         # Create central widget and main layout
         central_widget = QWidget()
         main_layout = QVBoxLayout(central_widget)
 
-        # Create two main panels
+        # Create three main panels
         top_panel = self.create_controls_panel()
+        log_panel = self.create_log_panel()
         bottom_panel = self.create_monitoring_panel()
 
         # Add panels to main layout
-        main_layout.addWidget(top_panel, 3)  # Control panel takes more space
-        main_layout.addWidget(bottom_panel, 1)
+        main_layout.addWidget(top_panel, 3)  # Control panel takes most space
+        main_layout.addWidget(log_panel, 1)  # Log panel same size as status
+        main_layout.addWidget(bottom_panel, 1)  # Status panel
 
         # Set central widget
         self.setCentralWidget(central_widget)
@@ -85,347 +103,314 @@ class CavityControlGUI(QMainWindow):
 
     def pid_output_value(self):
         """Get current PID output value from mdrec"""
-        if self.mdrec_lock:
-            self.mdrec_lock.acquire()
-        try:
+        with self.mdrec_lock:
             return self.mdrec.lock_in.get(f'/{self.device_id}/pids/{self.dither_pid}/value')
-        finally:
-            self.mdrec_lock.release()
 
     def recenter_PID_output(self):
         """Recenter PID range around the current output value"""
         current_output = self.get_mdrec_output_offset()
-        if self.mdrec_lock:
-            self.mdrec_lock.acquire()
-        try:
+        with self.mdrec_lock:
             self.mdrec.lock_in.set(f'/{self.device_id}/pids/{self.dither_pid}/center', current_output)
             self.mdrec.lock_in.set(f'/{self.device_id}/pids/{self.dither_pid}/limitlower', -current_output)
             self.mdrec.lock_in.set(f'/{self.device_id}/pids/{self.dither_pid}/limitupper', 1.0 - current_output)
-        finally:
-            if self.mdrec_lock:
-                self.mdrec_lock.release()
 
     def get_mdrec_p_gain(self):
         """Get P gain from mdrec"""
-        if self.mdrec_lock:
-            self.mdrec_lock.acquire()
-        try:
+        with self.mdrec_lock:
             response = self.mdrec.lock_in.get(f'/{self.device_id}/pids/{self.dither_pid}/p')
             return float(response[self.device_id]['pids'][str(self.dither_pid)]['p']['value'][0])
-        finally:
-            if self.mdrec_lock:
-                self.mdrec_lock.release()
 
     def get_mdrec_i_gain(self):
         """Get I gain from mdrec"""
-        if self.mdrec_lock:
-            self.mdrec_lock.acquire()
-        try:
+        with self.mdrec_lock:
             response = self.mdrec.lock_in.get(f'/{self.device_id}/pids/{self.dither_pid}/i') 
             return float(response[self.device_id]['pids'][str(self.dither_pid)]['i']['value'][0])
-        finally:
-            if self.mdrec_lock:
-                self.mdrec_lock.release()
 
     def get_mdrec_bandwidth(self):
         """Get bandwidth from mdrec"""
-        if self.mdrec_lock:
-            self.mdrec_lock.acquire()
-        try:
+        with self.mdrec_lock:
             response = self.mdrec.lock_in.get(f'/{self.device_id}/pids/{self.dither_pid}/demod/timeconstant')
             return df2tc(float(response[self.device_id]['pids'][str(self.dither_pid)]['demod']['timeconstant']['value'][0]))
-        finally:
-            if self.mdrec_lock:
-                self.mdrec_lock.release()
 
     def get_mdrec_pid_enabled(self):
         """Get PID enabled state from mdrec"""
-        if self.mdrec_lock:
-            self.mdrec_lock.acquire()
-        try:
+        with self.mdrec_lock:
             response = self.mdrec.lock_in.get(f'/{self.device_id}/pids/{self.dither_pid}/enable')
             return float(response[self.device_id]['pids'][str(self.dither_pid)]['enable']['value'][0]) == 1
-        finally:
-            if self.mdrec_lock:
-                self.mdrec_lock.release()
 
     def get_mdrec_keep_i(self):
         """Get keep I value from mdrec"""
-        if self.mdrec_lock:
-            self.mdrec_lock.acquire()
-        try:
+        with self.mdrec_lock:
             response = self.mdrec.lock_in.get(f'/{self.device_id}/pids/{self.dither_pid}/keepint')
             return float(response[self.device_id]['pids'][str(self.dither_pid)]['keepint']['value'][0]) == 1
-        finally:
-            if self.mdrec_lock:
-                self.mdrec_lock.release()
 
     def get_mdrec_output_offset(self):
         """Get output offset from mdrec"""
-        if self.mdrec_lock:
-            self.mdrec_lock.acquire()
-        try:
+        with self.mdrec_lock:
             response = self.mdrec.lock_in.get(f'/{self.device_id}/sigouts/0/offset')
             return float(response[self.device_id]['sigouts']['0']['offset']['value'][0])
-        finally:
-            if self.mdrec_lock:
-                self.mdrec_lock.release()
 
     def get_mdrec_dither_freq(self):
         """Get dither frequency from mdrec"""
-        if self.mdrec_lock:
-            self.mdrec_lock.acquire()
-        try:
+        with self.mdrec_lock:
             response = self.mdrec.lock_in.get(f'/{self.device_id}/oscs/{self.dither_drive_demod}/freq')
             # Convert Hz to kHz for display
             return float(response[self.device_id]['oscs'][str(self.dither_drive_demod)]['freq']['value'][0]) / 1000.0
-        finally:
-            if self.mdrec_lock:
-                self.mdrec_lock.release()
 
     def get_mdrec_dither_strength(self):
         """Get dither strength from mdrec"""
-        if self.mdrec_lock:
-            self.mdrec_lock.acquire()
-        try:
+        with self.mdrec_lock:
             response = self.mdrec.lock_in.get(f'/{self.device_id}/sigouts/0/amplitudes/{self.dither_drive_demod}')
             return float(response[self.device_id]['sigouts']['0']['amplitudes'][str(self.dither_drive_demod)]['value'][0])
-        finally:
-            if self.mdrec_lock:
-                self.mdrec_lock.release()
 
     def get_mdrec_demod_phase(self):
         """Get demodulation phase from mdrec"""
-        if self.mdrec_lock:
-            self.mdrec_lock.acquire()
-        try:
+        with self.mdrec_lock:
             response = self.mdrec.lock_in.get(f'/{self.device_id}/demods/{self.dither_in_demod}/phaseshift')
             return float(response[self.device_id]['demods'][str(self.dither_in_demod)]['phaseshift']['value'][0])
-        finally:
-            if self.mdrec_lock:
-                self.mdrec_lock.release()
 
     def get_fg_waveform(self):
         """Get waveform from fg"""
-        if self.fg_lock:
-            self.fg_lock.acquire()
-        try:
+        with self.fg_lock:
             # Strip any whitespace and convert to lowercase to ensure proper matching
             return self.fg.out_waveform.strip().lower()
-        finally:
-            if self.fg_lock:
-                self.fg_lock.release()
 
     def get_fg_amplitude(self):
         """Get amplitude from fg in mV"""
-        if self.fg_lock:
-            self.fg_lock.acquire()
-        try:
+        with self.fg_lock:
             return self.fg.out_amplitude * 1000  # Convert V to mV
-        finally:
-            if self.fg_lock:
-                self.fg_lock.release()
 
     def get_fg_frequency(self):
         """Get frequency from fg"""
-        if self.fg_lock:
-            self.fg_lock.acquire()
-        try:
+        with self.fg_lock:
             return self.fg.out_frequency
-        finally:
-            if self.fg_lock:
-                self.fg_lock.release()
 
     def get_fg_offset(self):
         """Get offset from fg"""
-        if self.fg_lock:
-            self.fg_lock.acquire()
-        try:
+        with self.fg_lock:
             return self.fg.out_offset
-        finally:
-            if self.fg_lock:
-                self.fg_lock.release()
 
     def get_fg_output_enabled(self):
         """Get output enabled state from fg"""
-        if self.fg_lock:
-            self.fg_lock.acquire()
-        try:
+        with self.fg_lock:
             return self.fg.out
-        finally:
-            if self.fg_lock:
-                self.fg_lock.release()
 
     def get_mdrec_dither_enable(self):
         """Get dither enable state from mdrec"""
-        if self.mdrec_lock:
-            self.mdrec_lock.acquire()
-        try:
+        with self.mdrec_lock:
             response = self.mdrec.lock_in.get(f'/{self.device_id}/sigouts/0/enables/{self.dither_drive_demod}')
             return float(response[self.device_id]['sigouts']['0']['enables'][str(self.dither_drive_demod)]['value'][0]) == 1
-        finally:
-            if self.mdrec_lock:
-                self.mdrec_lock.release()
 
     def get_mdrec_slow_offset(self):
         """Get slow offset control voltage from mdrec"""
-        if self.mdrec_lock:
-            self.mdrec_lock.acquire()
-        try:
+        with self.mdrec_lock:
             response = self.mdrec.lock_in.get(f'/{self.device_id}/auxouts/{self.slow_offset}/offset')
             return float(response[self.device_id]['auxouts'][str(self.slow_offset)]['offset']['value'][0])
-        finally:
-            if self.mdrec_lock:
-                self.mdrec_lock.release()
 
     def set_initial_values_from_devices(self):
         """Set initial values for widgets from mdrec and fg"""
-        if self.mdrec:
-            # Block signals during initialization to prevent unnecessary updates
-            self.p_gain_spinbox.blockSignals(True)
-            self.i_gain_spinbox.blockSignals(True)
-            self.bandwidth_spinbox.blockSignals(True)
-            self.pid_enable_checkbox.blockSignals(True)
-            self.keep_i_checkbox.blockSignals(True)
-            self.offset_spinbox.blockSignals(True)
-            self.dither_freq_spinbox.blockSignals(True)
-            self.dither_strength_spinbox.blockSignals(True)
-            self.demod_phase_spinbox.blockSignals(True)
-            self.dither_enable_checkbox.blockSignals(True)  # Added
+        # Block signals during initialization to prevent unnecessary updates
+        self.p_gain_spinbox.blockSignals(True)
+        self.i_gain_spinbox.blockSignals(True)
+        self.bandwidth_spinbox.blockSignals(True)
+        self.pid_enable_checkbox.blockSignals(True)
+        self.keep_i_checkbox.blockSignals(True)
+        self.offset_spinbox.blockSignals(True)
+        self.dither_freq_spinbox.blockSignals(True)
+        self.dither_strength_spinbox.blockSignals(True)
+        self.demod_phase_spinbox.blockSignals(True)
+        self.dither_enable_checkbox.blockSignals(True)
+        
+        # Set values
+        self.p_gain_spinbox.setValue(self.get_mdrec_p_gain())
+        self.i_gain_spinbox.setValue(self.get_mdrec_i_gain())
+        self.bandwidth_spinbox.setValue(self.get_mdrec_bandwidth())
+        self.pid_enable_checkbox.setChecked(self.get_mdrec_pid_enabled())
+        self.keep_i_checkbox.setChecked(self.get_mdrec_keep_i())
+        
+        # Set dither and demodulation values
+        self.dither_freq_spinbox.setValue(self.get_mdrec_dither_freq())
+        self.dither_strength_spinbox.setValue(self.get_mdrec_dither_strength() * 1000.0)  # Convert V to mV
+        self.demod_phase_spinbox.setValue(self.get_mdrec_demod_phase())
+        self.dither_enable_checkbox.setChecked(self.get_mdrec_dither_enable())
+        
+        # Get offset value first and block signals
+        self.offset_spinbox.blockSignals(True)
+        self.offset_slider.blockSignals(True)
+        
+        # Get current offset value from device
+        offset_value = self.get_mdrec_output_offset()
+        
+        # Set base offset to the device value and initialize fine adjustment to 0
+        self.base_offset = offset_value
+        
+        # Initialize fine offset slider to 0
+        self.fine_offset_slider.blockSignals(True)
+        self.fine_offset_slider.setValue(0)
+        self.fine_offset_label.setText("0.0 mV")
+        self.fine_offset_slider.blockSignals(False)
+        
+        # Set spinbox to the total (which is just base offset now)
+        self.offset_spinbox.blockSignals(True)
+        self.offset_spinbox.setValue(offset_value)
+        self.offset_spinbox.blockSignals(False)
+        
+        # Set slider to match base offset
+        self.offset_slider.blockSignals(True)
+        self.offset_slider.setValue(int(offset_value * 100))
+        self.offset_slider.blockSignals(False)
+        
+        # Update status indicators after setting values
+        self.output_value_label.setText(f"{offset_value:.3f} V")
+        self.update_status_indicators()
+        
+        # Add slow offset initialization - read current value from device
+        self.slow_offset_spinbox.blockSignals(True)
+        self.slow_offset_slider.blockSignals(True)
+        self.slow_offset_fine_slider.blockSignals(True)
+        
+        # Read current value directly from device
+        try:
+            slow_offset_value = self.get_mdrec_slow_offset()
+            self.log(f"Initial slow offset value read from device: {slow_offset_value:.3f}V")
+        except Exception as e:
+            # Default to 4.0V if reading fails
+            self.log(f"Failed to read slow offset from device: {e}")
+            slow_offset_value = 4.0
             
-            # Set values
-            self.p_gain_spinbox.setValue(self.get_mdrec_p_gain())
-            self.i_gain_spinbox.setValue(self.get_mdrec_i_gain())
-            self.bandwidth_spinbox.setValue(self.get_mdrec_bandwidth())
-            self.pid_enable_checkbox.setChecked(self.get_mdrec_pid_enabled())
-            self.keep_i_checkbox.setChecked(self.get_mdrec_keep_i())
-            
-            # Set dither and demodulation values
-            self.dither_freq_spinbox.setValue(self.get_mdrec_dither_freq())
-            self.dither_strength_spinbox.setValue(self.get_mdrec_dither_strength() * 1000.0)  # Convert V to mV
-            self.demod_phase_spinbox.setValue(self.get_mdrec_demod_phase())
-            self.dither_enable_checkbox.setChecked(self.get_mdrec_dither_enable())
-            
-            # Get offset value first and block signals
-            self.offset_spinbox.blockSignals(True)
-            self.offset_slider.blockSignals(True)
-            
-            # Get current offset value from device
-            offset_value = self.get_mdrec_output_offset()
-            
-            # Set base offset to the device value and initialize fine adjustment to 0
-            self.base_offset = offset_value
-            
-            # Initialize fine offset slider to 0
-            self.fine_offset_slider.blockSignals(True)
-            self.fine_offset_slider.setValue(0)
-            self.fine_offset_label.setText("0.0 mV")
-            self.fine_offset_slider.blockSignals(False)
-            
-            # Set spinbox to the total (which is just base offset now)
-            self.offset_spinbox.blockSignals(True)
-            self.offset_spinbox.setValue(offset_value)
-            self.offset_spinbox.blockSignals(False)
-            
-            # Set slider to match base offset
-            self.offset_slider.blockSignals(True)
-            self.offset_slider.setValue(int(offset_value * 100))
-            self.offset_slider.blockSignals(False)
-            
-            # Update status indicators after setting values
-            self.output_value_label.setText(f"{offset_value:.3f} V")
-            self.update_status_indicators()
-            
-            # Add slow offset initialization - read current value from device
-            self.slow_offset_spinbox.blockSignals(True)
-            self.slow_offset_slider.blockSignals(True)
-            self.slow_offset_fine_slider.blockSignals(True)
-            
-            # Read current value directly from device
-            try:
-                slow_offset_value = self.get_mdrec_slow_offset()
-                self.log(f"Initial slow offset value read from device: {slow_offset_value:.3f}V")
-            except Exception as e:
-                # Default to 4.0V if reading fails
-                self.log(f"Failed to read slow offset from device: {e}")
-                slow_offset_value = 4.0
-                
-            self.slow_offset_base = slow_offset_value  # Initialize base value
-            
-            # Set controls with actual value from device
-            self.slow_offset_spinbox.setValue(slow_offset_value)
-            self.slow_offset_slider.setValue(int(slow_offset_value * 100))
-            self.slow_offset_fine_slider.setValue(0)  # Fine adjustment starts at 0
-            self.slow_offset_fine_label.setText("0.0 mV")
-            
-            self.slow_offset_spinbox.blockSignals(False)
-            self.slow_offset_slider.blockSignals(False)
-            self.slow_offset_fine_slider.blockSignals(False)
-            
-            # Unblock signals after setting values
-            self.p_gain_spinbox.blockSignals(False)
-            self.i_gain_spinbox.blockSignals(False)
-            self.bandwidth_spinbox.blockSignals(False)
-            self.pid_enable_checkbox.blockSignals(False)
-            self.keep_i_checkbox.blockSignals(False)
-            self.offset_spinbox.blockSignals(False)
-            self.dither_freq_spinbox.blockSignals(False)
-            self.dither_strength_spinbox.blockSignals(False)
-            self.demod_phase_spinbox.blockSignals(False)
-            self.dither_enable_checkbox.blockSignals(False)  # Added
-            
-        if self.fg:
-            # Block signals for FG controls
-            self.waveform_combo.blockSignals(True)
-            self.amplitude_spinbox.blockSignals(True)
-            self.freq_spinbox.blockSignals(True)
-            self.fg_offset_spinbox.blockSignals(True)
-            self.output_checkbox.blockSignals(True)
-            self.amplitude_fine_slider.blockSignals(True)  # Added
-            
-            # Set values
-            waveform = self.get_fg_waveform()
-            self.log(f"Read waveform from FG: '{waveform}'")
-            
-            # Find matching waveform in combo box
-            index = -1
-            for i, wf in enumerate(self.WAVEFORMS):
-                if wf.lower() == waveform.lower():
-                    index = i
-                    break
-            
-            if index >= 0:
-                self.waveform_combo.setCurrentIndex(index)
-            else:
-                self.log(f"Warning: Waveform '{waveform}' not found in list, defaulting to first option")
-                self.waveform_combo.setCurrentIndex(0)
-            
-            amplitude_mv = self.get_fg_amplitude()
-            self.amplitude_spinbox.setValue(amplitude_mv)
-            self.amplitude_fine_slider.setValue(0)  # Reset fine adjustment to 0
-            self.amplitude_fine_label.setText("0 mV")
-            
-            self.freq_spinbox.setValue(self.get_fg_frequency())
-            
-            # Calculate offset from amplitude (should be amplitude/2)
+        self.slow_offset_base = slow_offset_value  # Initialize base value
+        
+        # Set controls with actual value from device
+        self.slow_offset_spinbox.setValue(slow_offset_value)
+        self.slow_offset_slider.setValue(int(slow_offset_value * 100))
+        self.slow_offset_fine_slider.setValue(0)  # Fine adjustment starts at 0
+        self.slow_offset_fine_label.setText("0.0 mV")
+        
+        self.slow_offset_spinbox.blockSignals(False)
+        self.slow_offset_slider.blockSignals(False)
+        self.slow_offset_fine_slider.blockSignals(False)
+        
+        # Unblock signals after setting values
+        self.p_gain_spinbox.blockSignals(False)
+        self.i_gain_spinbox.blockSignals(False)
+        self.bandwidth_spinbox.blockSignals(False)
+        self.pid_enable_checkbox.blockSignals(False)
+        self.keep_i_checkbox.blockSignals(False)
+        self.offset_spinbox.blockSignals(False)
+        self.dither_freq_spinbox.blockSignals(False)
+        self.dither_strength_spinbox.blockSignals(False)
+        self.demod_phase_spinbox.blockSignals(False)
+        self.dither_enable_checkbox.blockSignals(False)
+        
+        # FG initialization
+        # Block signals for FG controls
+        self.waveform_combo.blockSignals(True)
+        self.amplitude_spinbox.blockSignals(True)
+        self.freq_spinbox.blockSignals(True)
+        self.fg_offset_spinbox.blockSignals(True)
+        self.output_checkbox.blockSignals(True)
+        self.amplitude_fine_slider.blockSignals(True)
+        
+        # Set values
+        waveform = self.get_fg_waveform()
+        self.log(f"Read waveform from FG: '{waveform}'")
+        
+        # Find matching waveform in combo box
+        index = -1
+        for i, wf in enumerate(self.WAVEFORMS):
+            if wf.lower() == waveform.lower():
+                index = i
+                break
+        
+        if index >= 0:
+            self.waveform_combo.setCurrentIndex(index)
+        else:
+            self.log(f"Warning: Waveform '{waveform}' not found in list, defaulting to first option")
+            self.waveform_combo.setCurrentIndex(0)
+        
+        amplitude_mv = self.get_fg_amplitude()
+        self.amplitude_spinbox.setValue(amplitude_mv)
+        self.amplitude_fine_slider.setValue(0)  # Reset fine adjustment to 0
+        self.amplitude_fine_label.setText("0 mV")
+        
+        self.freq_spinbox.setValue(self.get_fg_frequency())
+        
+        # Calculate offset from amplitude (should be amplitude/2)
+        if not self.keep_offset_zero:
             offset_mv = amplitude_mv / 2.0
-            self.fg_offset_spinbox.setValue(offset_mv)
-            
-            self.output_checkbox.setChecked(self.get_fg_output_enabled())
-            
-            # Unblock signals
-            self.waveform_combo.blockSignals(False)
-            self.amplitude_spinbox.blockSignals(False)
-            self.freq_spinbox.blockSignals(False)
-            self.fg_offset_spinbox.blockSignals(False)
-            self.output_checkbox.blockSignals(False)
-            self.amplitude_fine_slider.blockSignals(False)  # Added
+        else:
+            offset_mv = 0.0
+        self.fg_offset_spinbox.setValue(offset_mv)
+        
+        self.output_checkbox.setChecked(self.get_fg_output_enabled())
+        
+        # Unblock signals
+        self.waveform_combo.blockSignals(False)
+        self.amplitude_spinbox.blockSignals(False)
+        self.freq_spinbox.blockSignals(False)
+        self.fg_offset_spinbox.blockSignals(False)
+        self.output_checkbox.blockSignals(False)
+        self.amplitude_fine_slider.blockSignals(False)
 
         # Initialize fine offset slider to 0
         self.fine_offset_slider.blockSignals(True)
         self.fine_offset_slider.setValue(0)  # Always start at 0
         self.fine_offset_label.setText("0.0 mV")
         self.fine_offset_slider.blockSignals(False)
+
+    def disable_pid(self):
+        """Safely disable PID by triggering checkbox state change"""
+        if self.pid_enable_checkbox.isChecked():
+            self.pid_enable_checkbox.setChecked(False)  # This will trigger on_pid_enable_changed
+
+    def enable_pid(self):
+        """Safely enable PID by triggering checkbox state change"""
+        if not self.pid_enable_checkbox.isChecked():
+            self.pid_enable_checkbox.setChecked(True)  # This will trigger on_pid_enable_changed
+
+    def set_pid_enabled(self, enabled):
+        """Set PID enabled state (True to enable, False to disable)"""
+        if enabled:
+            self.enable_pid()
+        else:
+            self.disable_pid()
+
+    def set_slow_offset(self, value):
+        """
+        Programmatically set the slow offset voltage and update all GUI controls
+        
+        Args:
+            value (float): Slow offset voltage in volts (must be between 1.5V and 6.5V)
+        """
+        # Clamp value to valid range
+        value = max(1.5, min(6.5, value))
+        
+        # Update the device
+        with self.mdrec_lock:
+            self.mdrec.lock_in.set(f'/{self.device_id}/auxouts/{self.slow_offset}/offset', value)
+        
+        # Update the base value (assuming fine adjustment is at 0)
+        self.slow_offset_base = value
+        
+        # Block signals to prevent triggering event handlers
+        self.slow_offset_spinbox.blockSignals(True)
+        self.slow_offset_slider.blockSignals(True)
+        self.slow_offset_fine_slider.blockSignals(True)
+        
+        # Update spinbox
+        self.slow_offset_spinbox.setValue(value*1000)  # Convert V to mV for spinbox
+        
+        # Update slider (convert voltage to slider value)
+        self.slow_offset_slider.setValue(int(value * 100))
+        
+        # Reset fine adjustment to 0
+        self.slow_offset_fine_slider.setValue(0)
+        self.slow_offset_fine_label.setText("0.0 mV")
+        
+        # Unblock signals
+        self.slow_offset_spinbox.blockSignals(False)
+        self.slow_offset_slider.blockSignals(False)
+        self.slow_offset_fine_slider.blockSignals(False)
 
     def create_controls_panel(self):
         """Create the main controls panel with tabs"""
@@ -442,6 +427,37 @@ class CavityControlGUI(QMainWindow):
         panel.addTab(demod_tab, "Demodulation Settings")
         
         return panel
+    
+    def create_log_panel(self):
+        """Create the logging panel"""
+        panel = QGroupBox("Log Messages")
+        layout = QVBoxLayout(panel)
+        
+        # Create text edit for log messages (read-only)
+        self.log_text_edit = QTextEdit()
+        self.log_text_edit.setReadOnly(True)
+        self.log_text_edit.setMaximumHeight(150)  # Limit height
+        self.log_text_edit.setStyleSheet("""
+            QTextEdit {
+                background-color: #f5f5f5;
+                font-family: Consolas, Monaco, monospace;
+                font-size: 9pt;
+            }
+        """)
+        
+        layout.addWidget(self.log_text_edit)
+        
+        # Add a clear button
+        clear_button = QPushButton("Clear Log")
+        clear_button.clicked.connect(self.clear_log)
+        clear_button.setMaximumWidth(100)
+        layout.addWidget(clear_button)
+        
+        return panel
+    
+    def clear_log(self):
+        """Clear the log display"""
+        self.log_text_edit.clear()
     
     def create_pid_controls(self):
         """Create PID controller controls"""
@@ -510,6 +526,205 @@ class CavityControlGUI(QMainWindow):
         self.monitor_reflection_checkbox.setChecked(False)
         self.monitor_reflection_checkbox.stateChanged.connect(self.on_monitor_reflection_changed)
         pid_layout.addWidget(self.monitor_reflection_checkbox, 4, 3)
+
+        # Auto mode finder checkbox
+        pid_layout.addWidget(QLabel("Auto mode finder:"), 5, 2)
+        self.auto_mode_finder_checkbox = QCheckBox()
+        self.auto_mode_finder_checkbox.setChecked(False)
+        self.auto_mode_finder_checkbox.stateChanged.connect(self.on_auto_mode_finder_changed)
+        pid_layout.addWidget(self.auto_mode_finder_checkbox, 5, 3)
+
+        # Find Mode button
+        self.find_mode_button = QPushButton("Find Mode")
+        self.find_mode_button.clicked.connect(self.on_find_mode_clicked)
+        self.find_mode_button.setMaximumWidth(100)
+        pid_layout.addWidget(self.find_mode_button, 6, 2, 1, 2)
+
+        # Keep I Value
+        pid_layout.addWidget(QLabel("Keep I Value:"), 4, 0)
+        keep_i_layout = QHBoxLayout()
+        self.keep_i_checkbox = QCheckBox()
+        self.keep_i_checkbox.setChecked(True)
+        self.keep_i_checkbox.stateChanged.connect(self.on_keep_i_changed)
+        keep_i_layout.addWidget(self.keep_i_checkbox)
+        keep_i_layout.addStretch()
+        pid_layout.addLayout(keep_i_layout, 4, 1)
+
+        pid_group.setLayout(pid_layout)
+        layout.addWidget(pid_group)
+
+        # Slow Offset Control Group (moved to top priority)
+        slow_offset_group = QGroupBox("Slow Offset Control (Aux3)")
+        slow_offset_layout = QGridLayout()
+        
+        # Slow Offset Voltage - main control
+        slow_offset_layout.addWidget(QLabel("Total Offset (V):"), 0, 0)
+        self.slow_offset_spinbox = QDoubleSpinBox()
+        self.slow_offset_spinbox.setRange(1.5, 6.5)  # Changed range to 1.5V-6.5V
+        self.slow_offset_spinbox.setDecimals(3)
+        self.slow_offset_spinbox.setSingleStep(0.01)
+        self.slow_offset_spinbox.setKeyboardTracking(False)
+        self.slow_offset_spinbox.valueChanged.connect(self.on_slow_offset_changed)
+        slow_offset_layout.addWidget(self.slow_offset_spinbox, 0, 1)
+
+        # Rough adjustment slider
+        self.slow_offset_slider = QSlider(Qt.Horizontal)
+        self.slow_offset_slider.setRange(150, 650)  # 1.5V to 6.5V with 0.01V resolution
+        self.slow_offset_slider.setTickPosition(QSlider.TicksBelow)
+        self.slow_offset_slider.setTickInterval(100)  # Ticks every 1V
+        self.slow_offset_slider.valueChanged.connect(self.on_slow_offset_slider_changed)
+        slow_offset_layout.addWidget(self.slow_offset_slider, 1, 0, 1, 2)
+        
+        # Fine adjustment slider
+        slow_offset_layout.addWidget(QLabel("Fine Adjustment (mV):"), 2, 0)
+        self.slow_offset_fine_slider = QSlider(Qt.Horizontal)
+        self.slow_offset_fine_slider.setRange(-25, 25)  # -25mV to +25mV fine adjustment
+        self.slow_offset_fine_slider.setValue(0)
+        self.slow_offset_fine_slider.setTickPosition(QSlider.TicksBelow)
+        self.slow_offset_fine_slider.setTickInterval(5)  # Ticks every 5mV
+        self.slow_offset_fine_slider.valueChanged.connect(self.on_slow_offset_fine_changed)
+        slow_offset_layout.addWidget(self.slow_offset_fine_slider, 2, 1)
+        
+        # Fine adjustment value display
+        self.slow_offset_fine_label = QLabel("0.0 mV")
+        slow_offset_layout.addWidget(self.slow_offset_fine_label, 3, 1)
+        
+        slow_offset_group.setLayout(slow_offset_layout)
+        layout.addWidget(slow_offset_group)
+        
+        # Output Settings Group (moved below slow offset)
+        output_group = QGroupBox("Output Settings")
+        output_layout = QGridLayout()
+
+        # Output Signal Offset (now shows total including fine adjustment)
+        output_layout.addWidget(QLabel("Total Output (V):"), 0, 0)
+        self.offset_spinbox = QDoubleSpinBox()
+        self.offset_spinbox.setRange(0, 1.0)  # Changed from 5.0 to 1.0
+        # Default to 0.5V instead of 2V for better starting point in new range
+        self.offset_spinbox.setValue(0.5)
+        self.offset_spinbox.setDecimals(3)
+        self.offset_spinbox.setSingleStep(0.01)
+        self.offset_spinbox.setKeyboardTracking(False)
+        self.offset_spinbox.valueChanged.connect(self.on_offset_changed)
+        output_layout.addWidget(self.offset_spinbox, 0, 1)
+
+        # Add a slider for visual control of offset 
+        self.offset_slider = QSlider(Qt.Horizontal)
+        self.offset_slider.setRange(0, 100)  # Changed from 500 to 100 for 0-1V with 0.01V resolution
+        self.offset_slider.setValue(50)  # Default to 0.5V (matching spinbox)
+        self.offset_slider.valueChanged.connect(self.on_offset_slider_changed)
+        output_layout.addWidget(self.offset_slider, 1, 0, 1, 2)
+
+        # Fine offset adjustment
+        output_layout.addWidget(QLabel("Fine Adjustment (mV):"), 2, 0)
+        self.fine_offset_slider = QSlider(Qt.Horizontal)
+        self.fine_offset_slider.setRange(-25, 25)  # -25mV to +25mV (each step is 1mV)
+        self.fine_offset_slider.setValue(0)
+        self.fine_offset_slider.setTickPosition(QSlider.TicksBelow)
+        self.fine_offset_slider.setTickInterval(5)  # Ticks at -25, -20, ..., 20, 25 mV
+        self.fine_offset_slider.valueChanged.connect(self.on_fine_offset_slider_changed)
+        output_layout.addWidget(self.fine_offset_slider, 2, 1)
+        
+        # Fine offset value display
+        self.fine_offset_label = QLabel("0.0 mV")
+        output_layout.addWidget(self.fine_offset_label, 3, 1)
+        
+        # Store the base offset (without fine adjustment) as an instance variable
+        self.base_offset = 0.5  # Default to 0.5V instead of 2.0V
+
+        # Remove the separate Total Output display since spinbox now shows total
+
+        output_group.setLayout(output_layout)
+        layout.addWidget(output_group)
+
+        # Add stretch to push controls to the top
+        layout.addStretch()
+
+        # Set initial state of offset based on PID enable
+        self.update_offset_spinbox_state()
+
+        return widget
+    
+    def create_pid_controls(self):
+        """Create PID controller controls"""
+        widget = QWidget()
+        
+        # Use a QVBoxLayout to arrange groups vertically
+        layout = QVBoxLayout(widget)
+        
+        # PID Parameters Group
+        pid_group = QGroupBox("PID Parameters")
+        pid_layout = QGridLayout()
+
+        # P Gain
+        pid_layout.addWidget(QLabel("P Gain:"), 0, 0)
+        self.p_gain_spinbox = QDoubleSpinBox()
+        self.p_gain_spinbox.setRange(-1000000, 1000000)
+        self.p_gain_spinbox.setValue(0.0)
+        self.p_gain_spinbox.setDecimals(3)
+        self.p_gain_spinbox.setSingleStep(0.1)
+        self.p_gain_spinbox.setKeyboardTracking(False)  # Only update when Enter is pressed
+        self.p_gain_spinbox.valueChanged.connect(self.on_p_gain_changed)
+        pid_layout.addWidget(self.p_gain_spinbox, 0, 1)
+
+        # I Gain
+        pid_layout.addWidget(QLabel("I Gain:"), 1, 0)
+        self.i_gain_spinbox = QDoubleSpinBox()
+        self.i_gain_spinbox.setRange(-1000000, 1000000)
+        self.i_gain_spinbox.setValue(0.0)
+        self.i_gain_spinbox.setDecimals(3)
+        self.i_gain_spinbox.setSingleStep(0.1)
+        self.i_gain_spinbox.setKeyboardTracking(False)  # Only update when Enter is pressed
+        self.i_gain_spinbox.valueChanged.connect(self.on_i_gain_changed)
+        pid_layout.addWidget(self.i_gain_spinbox, 1, 1)
+
+        # Bandwidth
+        pid_layout.addWidget(QLabel("Bandwidth (Hz):"), 2, 0)
+        self.bandwidth_spinbox = QDoubleSpinBox()
+        self.bandwidth_spinbox.setRange(0.1, 1000000)
+        self.bandwidth_spinbox.setValue(100.0)
+        self.bandwidth_spinbox.setDecimals(1)
+        self.bandwidth_spinbox.setSingleStep(10)
+        self.bandwidth_spinbox.setKeyboardTracking(False)  # Only update when Enter is pressed
+        self.bandwidth_spinbox.valueChanged.connect(self.on_bandwidth_changed)
+        pid_layout.addWidget(self.bandwidth_spinbox, 2, 1)
+
+        # PID Enable
+        pid_layout.addWidget(QLabel("PID Enable:"), 3, 0)
+        pid_enable_layout = QHBoxLayout()
+        self.pid_enable_checkbox = QCheckBox()
+        self.pid_enable_checkbox.setChecked(False)
+        self.pid_enable_checkbox.stateChanged.connect(self.on_pid_enable_changed)
+        pid_enable_layout.addWidget(self.pid_enable_checkbox)
+        pid_enable_layout.addStretch()
+        pid_layout.addLayout(pid_enable_layout, 3, 1)
+        
+        # Auto Offset Management checkbox
+        pid_layout.addWidget(QLabel("Offset adjustment:"), 3, 2)
+        self.auto_offset_checkbox = QCheckBox()
+        self.auto_offset_checkbox.setChecked(False)
+        self.auto_offset_checkbox.stateChanged.connect(self.on_auto_offset_changed)
+        pid_layout.addWidget(self.auto_offset_checkbox, 3, 3)
+        
+        # Monitor reflection checkbox
+        pid_layout.addWidget(QLabel("Monitor Reflection:"), 4, 2)
+        self.monitor_reflection_checkbox = QCheckBox()
+        self.monitor_reflection_checkbox.setChecked(False)
+        self.monitor_reflection_checkbox.stateChanged.connect(self.on_monitor_reflection_changed)
+        pid_layout.addWidget(self.monitor_reflection_checkbox, 4, 3)
+
+        # Auto mode finder checkbox
+        pid_layout.addWidget(QLabel("Auto mode finder:"), 5, 2)
+        self.auto_mode_finder_checkbox = QCheckBox()
+        self.auto_mode_finder_checkbox.setChecked(False)
+        self.auto_mode_finder_checkbox.stateChanged.connect(self.on_auto_mode_finder_changed)
+        pid_layout.addWidget(self.auto_mode_finder_checkbox, 5, 3)
+
+        # Find Mode button
+        self.find_mode_button = QPushButton("Find Mode")
+        self.find_mode_button.clicked.connect(self.on_find_mode_clicked)
+        self.find_mode_button.setMaximumWidth(100)
+        pid_layout.addWidget(self.find_mode_button, 6, 2, 1, 2)
 
         # Keep I Value
         pid_layout.addWidget(QLabel("Keep I Value:"), 4, 0)
@@ -794,10 +1009,11 @@ class CavityControlGUI(QMainWindow):
         layout.addWidget(QLabel("Reflection Signal:"), 2, 0)
         self.reflection_label = QLabel("--- V")
         layout.addWidget(self.reflection_label, 2, 1)
-        # Add offset adjustment status
-        layout.addWidget(QLabel("Offset adjustment Status:"), 2, 2)
+        
+        # Move offset adjustment status to next row and span two columns for better visibility
+        layout.addWidget(QLabel("Offset Adjuster:"), 3, 0)
         self.auto_offset_status_label = QLabel("Idle")
-        layout.addWidget(self.auto_offset_status_label, 2, 3)
+        layout.addWidget(self.auto_offset_status_label, 3, 1, 1, 3)  # Span 3 columns
         
         # Add spacer item to push status labels to the left
         layout.setColumnStretch(4, 1)
@@ -810,18 +1026,6 @@ class CavityControlGUI(QMainWindow):
         self.offset_spinbox.setEnabled(not is_pid_enabled)
         self.offset_slider.setEnabled(not is_pid_enabled)
         self.fine_offset_slider.setEnabled(not is_pid_enabled)  # Also disable fine adjustment
-        
-        # Update the appearance to indicate it's disabled
-        if is_pid_enabled:
-            self.offset_spinbox.setStyleSheet("background-color: #f0f0f0;")
-            self.offset_slider.setStyleSheet("background-color: #f0f0f0;")
-            self.fine_offset_slider.setStyleSheet("background-color: #f0f0f0;")
-            self.fine_offset_label.setStyleSheet("color: #a0a0a0;")
-        else:
-            self.offset_spinbox.setStyleSheet("")
-            self.offset_slider.setStyleSheet("")
-            self.fine_offset_slider.setStyleSheet("")
-            self.fine_offset_label.setStyleSheet("")
 
     def update_status_indicators(self):
         """Update status indicators based on current state"""
@@ -854,7 +1058,7 @@ class CavityControlGUI(QMainWindow):
     def on_offset_slider_changed(self, value):
         """Handle offset slider change"""
         # Convert slider value (0-100) to voltage (0-1V) - this is the new base offset
-        self.base_offset = value / 100.0  # Changed from /100.0 to match new range
+        self.base_offset = value / 100.0
         
         # Get current fine adjustment in volts
         fine_offset_v = (self.fine_offset_slider.value() * 0.5) / 1000.0
@@ -868,14 +1072,9 @@ class CavityControlGUI(QMainWindow):
         self.offset_spinbox.blockSignals(False)
         
         # Apply to device if PID is disabled
-        if self.mdrec and not self.pid_enable_checkbox.isChecked():
-            if self.mdrec_lock:
-                self.mdrec_lock.acquire()
-            try:
+        if not self.pid_enable_checkbox.isChecked():
+            with self.mdrec_lock:
                 self.mdrec.lock_in.set(f'/{self.device_id}/sigouts/0/offset', total_offset_v)
-            finally:
-                if self.mdrec_lock:
-                    self.mdrec_lock.release()
             self.output_value_label.setText(f"{total_offset_v:.3f} V")
 
     @pyqtSlot(int)
@@ -888,73 +1087,46 @@ class CavityControlGUI(QMainWindow):
     @pyqtSlot(float)
     def on_p_gain_changed(self, value):
         """Handle P gain changed event"""
-        if self.mdrec:
-            self.log(f"P gain changed to {value}")
-            if self.mdrec_lock:
-                self.mdrec_lock.acquire()
-            try:
-                self.mdrec.lock_in.set(f'/{self.device_id}/pids/{self.dither_pid}/p', value)
-            finally:
-                if self.mdrec_lock:
-                    self.mdrec_lock.release()
+        self.log(f"P gain changed to {value}")
+        with self.mdrec_lock:
+            self.mdrec.lock_in.set(f'/{self.device_id}/pids/{self.dither_pid}/p', value)
 
     @pyqtSlot(float)
     def on_i_gain_changed(self, value):
         """Handle I gain changed event"""
-        if self.mdrec:
-            self.log(f"I gain changed to {value}")
-            if self.mdrec_lock:
-                self.mdrec_lock.acquire()
-            try:
-                self.mdrec.lock_in.set(f'/{self.device_id}/pids/{self.dither_pid}/i', value)
-            finally:
-                if self.mdrec_lock:
-                    self.mdrec_lock.release()
+        self.log(f"I gain changed to {value}")
+        with self.mdrec_lock:
+            self.mdrec.lock_in.set(f'/{self.device_id}/pids/{self.dither_pid}/i', value)
 
     @pyqtSlot(float)
     def on_bandwidth_changed(self, value):
         """Handle bandwidth changed event"""
-        if self.mdrec:
-            self.log(f"Bandwidth changed to {value}")
-            if self.mdrec_lock:
-                self.mdrec_lock.acquire()
-            try:
-                self.mdrec.lock_in.set(f'/{self.device_id}/pids/{self.dither_pid}/demod/timeconstant', df2tc(value))
-            finally:
-                if self.mdrec_lock:
-                    self.mdrec_lock.release()
+        self.log(f"Bandwidth changed to {value}")
+        with self.mdrec_lock:
+            self.mdrec.lock_in.set(f'/{self.device_id}/pids/{self.dither_pid}/demod/timeconstant', df2tc(value))
 
     @pyqtSlot(int)
     def on_pid_enable_changed(self, state):
         """Handle PID enable changed event"""
         enabled = state == Qt.Checked
-        if self.mdrec:
-            self.log(f"PID enable changed to {enabled}")
+        self.log(f"PID enable changed to {enabled}")
+        
+        # If enabling PID, recenter the PID output first
+        if enabled:
+            self.log("Recentering PID output before enabling PID")
+            self.recenter_PID_output()
+        
+        with self.mdrec_lock:
+            self.mdrec.lock_in.set(f'/{self.device_id}/pids/{self.dither_pid}/enable', int(enabled))
             
-            # If enabling PID, recenter the PID output first
-            if enabled:
-                self.log("Recentering PID output before enabling PID")
-                self.recenter_PID_output()
-            
-            if self.mdrec_lock:
-                self.mdrec_lock.acquire()
-            try:
-                self.mdrec.lock_in.set(f'/{self.device_id}/pids/{self.dither_pid}/enable', int(enabled))
-            finally:
-                if self.mdrec_lock:
-                    self.mdrec_lock.release()
         self.update_offset_spinbox_state()
         self.update_status_indicators()
-        if not enabled and self.mdrec:
+        
+        if not enabled:
             # When disabling PID, read current offset from device and update controls
-            if self.mdrec_lock:
-                self.mdrec_lock.acquire()
-            try:
+            with self.mdrec_lock:
                 response = self.mdrec.lock_in.get(f'/{self.device_id}/sigouts/0/offset')
                 offset_value = float(response[self.device_id]['sigouts']['0']['offset']['value'][0])
-            finally:
-                if self.mdrec_lock:
-                    self.mdrec_lock.release()
             
             self.log(f"Setting output offset to {offset_value:.3f} V on PID disable")
             
@@ -984,29 +1156,18 @@ class CavityControlGUI(QMainWindow):
     def on_keep_i_changed(self, state):
         """Handle keep I value changed event"""
         enabled = state == Qt.Checked
-        if self.mdrec:
-            self.log(f"Keep I value changed to {enabled}")
-            if self.mdrec_lock:
-                self.mdrec_lock.acquire()
-            try:
-                self.mdrec.lock_in.set(f'/{self.device_id}/pids/{self.dither_pid}/keepint', int(enabled))
-            finally:
-                if self.mdrec_lock:
-                    self.mdrec_lock.release()
+        self.log(f"Keep I value changed to {enabled}")
+        with self.mdrec_lock:
+            self.mdrec.lock_in.set(f'/{self.device_id}/pids/{self.dither_pid}/keepint', int(enabled))
 
     @pyqtSlot(float)
     def on_offset_changed(self, value):
         """Handle offset changed event - now treats input as total value"""
-        if self.mdrec and not self.pid_enable_checkbox.isChecked():
+        if not self.pid_enable_checkbox.isChecked():
             # Apply the total offset directly to the device
             self.log(f"Total offset changed to {value:.3f} V")
-            if self.mdrec_lock:
-                self.mdrec_lock.acquire()
-            try:
+            with self.mdrec_lock:
                 self.mdrec.lock_in.set(f'/{self.device_id}/sigouts/0/offset', value)
-            finally:
-                if self.mdrec_lock:
-                    self.mdrec_lock.release()
             
             # Calculate the new base offset by removing the fine adjustment
             fine_offset_v = (self.fine_offset_slider.value() * 0.5) / 1000.0
@@ -1031,165 +1192,111 @@ class CavityControlGUI(QMainWindow):
     @pyqtSlot(float)
     def on_dither_freq_changed(self, value):
         """Handle dither frequency changed event (value in kHz)"""
-        if self.mdrec:
-            self.log(f"Dither frequency changed to {value:.3f} kHz")
-            # Convert kHz to Hz for device setting
-            if self.mdrec_lock:
-                self.mdrec_lock.acquire()
-            try:
-                self.mdrec.lock_in.set(f'/{self.device_id}/oscs/{self.dither_drive_demod}/freq', value * 1000.0)
-            finally:
-                if self.mdrec_lock:
-                    self.mdrec_lock.release()
+        self.log(f"Dither frequency changed to {value:.3f} kHz")
+        # Convert kHz to Hz for device setting
+        with self.mdrec_lock:
+            self.mdrec.lock_in.set(f'/{self.device_id}/oscs/{self.dither_drive_demod}/freq', value * 1000.0)
 
     @pyqtSlot(float)
     def on_dither_strength_changed(self, value):
         """Handle dither strength changed event (value in mV)"""
-        if self.mdrec:
-            self.log(f"Dither strength changed to {value:.3f} mV")
-            # Convert mV to V for device setting
-            if self.mdrec_lock:
-                self.mdrec_lock.acquire()
-            try:
-                self.mdrec.lock_in.set(f'/{self.device_id}/sigouts/0/amplitudes/{self.dither_drive_demod}', value/1000.0)
-            finally:
-                if self.mdrec_lock:
-                    self.mdrec_lock.release()
+        self.log(f"Dither strength changed to {value:.3f} mV")
+        # Convert mV to V for device setting
+        with self.mdrec_lock:
+            self.mdrec.lock_in.set(f'/{self.device_id}/sigouts/0/amplitudes/{self.dither_drive_demod}', value/1000.0)
 
     @pyqtSlot(int)
     def on_dither_enable_changed(self, state):
         """Handle dither enable changed event"""
         enabled = state == Qt.Checked
-        if self.mdrec:
-            self.log(f"Dither enable changed to {enabled}")
-            if self.mdrec_lock:
-                self.mdrec_lock.acquire()
-            try:
-                self.mdrec.lock_in.set(f'/{self.device_id}/sigouts/0/enables/{self.dither_drive_demod}', int(enabled))
-            finally:
-                if self.mdrec_lock:
-                    self.mdrec_lock.release()
-            self.update_status_indicators()
+        self.log(f"Dither enable changed to {enabled}")
+        with self.mdrec_lock:
+            self.mdrec.lock_in.set(f'/{self.device_id}/sigouts/0/enables/{self.dither_drive_demod}', int(enabled))
+        self.update_status_indicators()
 
     @pyqtSlot(float)
     def on_demod_phase_changed(self, value):
         """Handle demodulation phase changed event"""
-        if self.mdrec:
-            self.log(f"Demodulation phase changed to {value:.1f} deg")
-            if self.mdrec_lock:
-                self.mdrec_lock.acquire()
-            try:
-                self.mdrec.lock_in.set(f'/{self.device_id}/demods/{self.dither_in_demod}/phaseshift', value)
-                # Fix the phase slider update by extracting the value from the response
-                response = self.mdrec.lock_in.get(f'/{self.device_id}/demods/{self.dither_in_demod}/phaseshift')
-                phase_value = float(response[self.device_id]['demods'][str(self.dither_in_demod)]['phaseshift']['value'][0])
-            finally:
-                if self.mdrec_lock:
-                    self.mdrec_lock.release()
-                    
-            self.phase_slider.blockSignals(True)
-            self.phase_slider.setValue(int(phase_value))
-            self.phase_slider.blockSignals(False)
+        self.log(f"Demodulation phase changed to {value:.1f} deg")
+        with self.mdrec_lock:
+            self.mdrec.lock_in.set(f'/{self.device_id}/demods/{self.dither_in_demod}/phaseshift', value)
+            # Fix the phase slider update by extracting the value from the response
+            response = self.mdrec.lock_in.get(f'/{self.device_id}/demods/{self.dither_in_demod}/phaseshift')
+            phase_value = float(response[self.device_id]['demods'][str(self.dither_in_demod)]['phaseshift']['value'][0])
+                
+        self.phase_slider.blockSignals(True)
+        self.phase_slider.setValue(int(phase_value))
+        self.phase_slider.blockSignals(False)
     
     # Event handlers for function generator controls
     @pyqtSlot(int)
     def on_waveform_changed(self, index):
         """Handle waveform selection changed event"""
         waveform = self.WAVEFORMS[index]  # Get waveform from index
-        if self.fg:
-            self.log(f"Waveform changed to {waveform}")
-            if self.fg_lock:
-                self.fg_lock.acquire()
-            try:
-                self.fg.out_waveform = waveform  # Set waveform using fg's property
-            finally:
-                if self.fg_lock:
-                    self.fg_lock.release()
+        self.log(f"Waveform changed to {waveform}")
+        with self.fg_lock:
+            self.fg.out_waveform = waveform  # Set waveform using fg's property
         self.update_status_indicators()
     
     @pyqtSlot(float)
     def on_amplitude_changed(self, value_mv):
         """Handle base amplitude changed event (value in mV)"""
-        if self.fg:
-            # Add the fine adjustment to get total amplitude
-            total_amplitude_mv = value_mv + self.amplitude_fine_slider.value()
-            value_v = total_amplitude_mv / 1000.0  # Convert mV to V
-            self.log(f"Amplitude changed to {total_amplitude_mv:.1f} mV")
+        # Add the fine adjustment to get total amplitude
+        total_amplitude_mv = value_mv + self.amplitude_fine_slider.value()
+        value_v = total_amplitude_mv / 1000.0  # Convert mV to V
+        self.log(f"Amplitude changed to {total_amplitude_mv:.1f} mV")
+        
+        with self.fg_lock:
+            self.fg.out_amplitude = value_v
             
-            if self.fg_lock:
-                self.fg_lock.acquire()
-            try:
-                self.fg.out_amplitude = value_v
+            # Always set offset regardless of keep_offset_zero value
+            offset_mv = 0.0 if self.keep_offset_zero else total_amplitude_mv / 2.0
+            offset_v = offset_mv / 1000.0
+            self.fg.out_offset = offset_v
                 
-                # Set offset to half of total amplitude
-                offset_mv = total_amplitude_mv / 2.0
-                offset_v = offset_mv / 1000.0
-                self.fg.out_offset = offset_v
-            finally:
-                if self.fg_lock:
-                    self.fg_lock.release()
-                    
-            self.fg_offset_spinbox.setValue(offset_mv)  # Update display in mV
+        self.fg_offset_spinbox.setValue(offset_mv)  # Update display in mV
 
     @pyqtSlot(int)
     def on_amplitude_fine_changed(self, fine_mv):
         """Handle fine amplitude adjustment changed event"""
-        if self.fg:
-            self.amplitude_fine_label.setText(f"{fine_mv:+d} mV")
-            # Calculate total amplitude by adding fine adjustment to base
-            total_amplitude_mv = self.amplitude_spinbox.value() + fine_mv
-            value_v = total_amplitude_mv / 1000.0  # Convert mV to V
-            self.log(f"Fine adjustment: {fine_mv:+d} mV, total amplitude: {total_amplitude_mv:.1f} mV")
+        self.amplitude_fine_label.setText(f"{fine_mv:+d} mV")
+        # Calculate total amplitude by adding fine adjustment to base
+        total_amplitude_mv = self.amplitude_spinbox.value() + fine_mv
+        value_v = total_amplitude_mv / 1000.0  # Convert mV to V
+        self.log(f"Fine adjustment: {fine_mv:+d} mV, total amplitude: {total_amplitude_mv:.1f} mV")
+        
+        with self.fg_lock:
+            self.fg.out_amplitude = value_v
             
-            if self.fg_lock:
-                self.fg_lock.acquire()
-            try:
-                self.fg.out_amplitude = value_v
+            # Always set offset regardless of keep_offset_zero value
+            offset_mv = 0.0 if self.keep_offset_zero else total_amplitude_mv / 2.0
+            offset_v = offset_mv / 1000.0
+            self.fg.out_offset = offset_v
                 
-                # Set offset to half of total amplitude
-                offset_mv = total_amplitude_mv / 2.0
-                offset_v = offset_mv / 1000.0
-                self.fg.out_offset = offset_v
-            finally:
-                if self.fg_lock:
-                    self.fg_lock.release()
-                    
-            self.fg_offset_spinbox.setValue(offset_mv)  # Update display in mV
+        self.fg_offset_spinbox.setValue(offset_mv)  # Update display in mV
 
     @pyqtSlot(float)
     def on_freq_changed(self, value):
         """Handle frequency changed event"""
-        if self.fg:
-            self.log(f"Frequency changed to {value:.1f} Hz")
-            if self.fg_lock:
-                self.fg_lock.acquire()
-            try:
-                self.fg.out_frequency = value
-            finally:
-                if self.fg_lock:
-                    self.fg_lock.release()
+        self.log(f"Frequency changed to {value:.1f} Hz")
+        with self.fg_lock:
+            self.fg.out_frequency = value
 
     @pyqtSlot(int)
     def on_output_toggled(self, state):
         """Handle output toggled event"""
         enabled = state == Qt.Checked
-        if self.fg:
-            self.log(f"Output toggled to {enabled}")
-            if self.fg_lock:
-                self.fg_lock.acquire()
-            try:
-                self.fg.out = enabled
-                self.mdrec.lock_in.set(f'/{self.device_id}/sigouts/0/add', 1 if enabled else 0)
-            finally:
-                if self.fg_lock:
-                    self.fg_lock.release()
-            self.update_status_indicators()
+        self.log(f"Output toggled to {enabled}")
+        with self.fg_lock:
+            self.fg.out = enabled
+            self.mdrec.lock_in.set(f'/{self.device_id}/sigouts/0/add', 1 if enabled else 0)
+        self.update_status_indicators()
 
     @pyqtSlot(int)
     def on_fine_offset_slider_changed(self, value):
         """Handle fine offset slider change"""
-        # Each step is 0.5mV (value goes from -25 to 25, so *0.5 gives -12.5 to +12.5 mV)
-        fine_offset_mv = value * 0.5  # Changed back to 0.5 for finer control
+        # Each step is 0.5mV
+        fine_offset_mv = value * 0.5
         self.fine_offset_label.setText(f"{fine_offset_mv:+.1f} mV")
         
         # Calculate total offset
@@ -1202,39 +1309,28 @@ class CavityControlGUI(QMainWindow):
         self.offset_spinbox.blockSignals(False)
         
         # Apply to device if PID is disabled
-        if self.mdrec and not self.pid_enable_checkbox.isChecked():
+        if not self.pid_enable_checkbox.isChecked():
             self.log(f"Fine adjustment: {fine_offset_mv:+.1f} mV, total offset: {total_offset_v:.3f} V")
-            if self.mdrec_lock:
-                self.mdrec_lock.acquire()
-            try:
+            with self.mdrec_lock:
                 self.mdrec.lock_in.set(f'/{self.device_id}/sigouts/0/offset', total_offset_v)
-            finally:
-                if self.mdrec_lock:
-                    self.mdrec_lock.release()
             self.output_value_label.setText(f"{total_offset_v:.3f} V")
 
     # Add event handlers for slow offset control
     @pyqtSlot(float)
     def on_slow_offset_changed(self, value):
         """Handle slow offset value changed event"""
-        if self.mdrec:
-            self.log(f"Slow offset changed to {value:.3f} V")
-            if self.mdrec_lock:
-                self.mdrec_lock.acquire()
-            try:
-                self.mdrec.lock_in.set(f'/{self.device_id}/auxouts/{self.slow_offset}/offset', value)
-            finally:
-                if self.mdrec_lock:
-                    self.mdrec_lock.release()
-            
-            # Calculate the new base offset by removing the fine adjustment
-            fine_offset_v = (self.slow_offset_fine_slider.value() * 0.5) / 1000.0
-            self.slow_offset_base = value - fine_offset_v
-            
-            # Update slider to match new base offset
-            self.slow_offset_slider.blockSignals(True)
-            self.slow_offset_slider.setValue(int(self.slow_offset_base * 100))
-            self.slow_offset_slider.blockSignals(False)
+        self.log(f"Slow offset changed to {value:.3f} V")
+        with self.mdrec_lock:
+            self.mdrec.lock_in.set(f'/{self.device_id}/auxouts/{self.slow_offset}/offset', value)
+        
+        # Calculate the new base offset by removing the fine adjustment
+        fine_offset_v = (self.slow_offset_fine_slider.value() * 0.5) / 1000.0
+        self.slow_offset_base = value - fine_offset_v
+        
+        # Update slider to match new base offset
+        self.slow_offset_slider.blockSignals(True)
+        self.slow_offset_slider.setValue(int(self.slow_offset_base * 100))
+        self.slow_offset_slider.blockSignals(False)
     
     @pyqtSlot(int)
     def on_slow_offset_slider_changed(self, value):
@@ -1254,15 +1350,9 @@ class CavityControlGUI(QMainWindow):
         self.slow_offset_spinbox.blockSignals(False)
         
         # Apply to device
-        if self.mdrec:
-            self.log(f"Slow offset slider changed to {total_offset_v:.3f} V")
-            if self.mdrec_lock:
-                self.mdrec_lock.acquire()
-            try:
-                self.mdrec.lock_in.set(f'/{self.device_id}/auxouts/{self.slow_offset}/offset', total_offset_v)
-            finally:
-                if self.mdrec_lock:
-                    self.mdrec_lock.release()
+        self.log(f"Slow offset slider changed to {total_offset_v:.3f} V")
+        with self.mdrec_lock:
+            self.mdrec.lock_in.set(f'/{self.device_id}/auxouts/{self.slow_offset}/offset', total_offset_v)
     
     @pyqtSlot(int)
     def on_slow_offset_fine_changed(self, value):
@@ -1281,15 +1371,9 @@ class CavityControlGUI(QMainWindow):
         self.slow_offset_spinbox.blockSignals(False)
         
         # Apply to device
-        if self.mdrec:
-            self.log(f"Fine adjustment: {fine_offset_mv:+.1f} mV, total slow offset: {total_offset_v:.3f} V")
-            if self.mdrec_lock:
-                self.mdrec_lock.acquire()
-            try:
-                self.mdrec.lock_in.set(f'/{self.device_id}/auxouts/{self.slow_offset}/offset', total_offset_v)
-            finally:
-                if self.mdrec_lock:
-                    self.mdrec_lock.release()
+        self.log(f"Fine adjustment: {fine_offset_mv:+.1f} mV, total slow offset: {total_offset_v:.3f} V")
+        with self.mdrec_lock:
+            self.mdrec.lock_in.set(f'/{self.device_id}/auxouts/{self.slow_offset}/offset', total_offset_v)
 
     @pyqtSlot(int)
     def on_monitor_reflection_changed(self, state):
@@ -1308,6 +1392,70 @@ class CavityControlGUI(QMainWindow):
             self.start_auto_offset_management()
         else:
             self.stop_auto_offset_management()
+    
+    @pyqtSlot(int)
+    def on_auto_mode_finder_changed(self, state):
+        """Handle auto mode finder checkbox state change"""
+        enabled = state == Qt.Checked
+        if enabled:
+            self.start_auto_mode_finder()
+        else:
+            self.stop_auto_mode_finder()
+    
+    @pyqtSlot()
+    def on_find_mode_clicked(self):
+        """Handle find mode button click"""
+        self.log("Manual mode finding triggered")
+        self.mode_finding_routine
+
+    def start_auto_mode_finder(self):
+        """Start the background thread for automatic mode finding"""
+        if not self.auto_mode_finder_thread_running:
+            self.auto_mode_finder_thread_running = True
+            self.auto_mode_finder_thread = threading.Thread(target=self._auto_mode_finder_loop, daemon=True)
+            self.auto_mode_finder_thread.start()
+            self.log("Auto mode finder started")
+    
+    def stop_auto_mode_finder(self):
+        """Stop the background thread for automatic mode finding"""
+        if self.auto_mode_finder_thread_running:
+            self.auto_mode_finder_thread_running = False
+            if self.auto_mode_finder_thread:
+                self.auto_mode_finder_thread.join(timeout=5.0)
+            self.log("Auto mode finder stopped")
+    
+    def _auto_mode_finder_loop(self):
+        """Background thread loop to monitor lock status and re-find mode if lost"""
+        while self.auto_mode_finder_thread_running:
+            try:
+                # Check if PID is enabled (should be locked)
+                if self.pid_enable_checkbox.isChecked():
+                    # Check if cavity is actually locked
+                    if not self.is_cavity_locked():
+                        for _ in range(10):  # Double-check over 10 seconds
+                            if not self.auto_mode_finder_thread_running:
+                                break
+                            time.sleep(0.1)
+                        if not self.is_cavity_locked():
+                            self.log("Lock lost! Starting mode finding routine...")
+                            # Disable PID before mode finding
+                            self.disable_pid()
+                            # Run mode finding routine
+                            self.mode_finding_routine()
+                            # Mode finding routine will re-enable PID if it was enabled before
+                    else:
+                        self.log("Cavity locked - monitoring")
+                else:
+                    self.log("PID not enabled - waiting")
+                
+            except Exception as e:
+                self.log(f"Error in auto mode finder: {e}")
+            
+            # Sleep for 5 seconds, but check frequently if we should stop
+            for _ in range(50):  # Check every 0.1s for 5 seconds total
+                if not self.auto_mode_finder_thread_running:
+                    break
+                time.sleep(0.1)
     
     def start_auto_offset_management(self):
         """Start the background thread for automatic offset management"""
@@ -1360,13 +1508,10 @@ class CavityControlGUI(QMainWindow):
         
         self.ramping_in_progress = True
         
-        # Block slow offset controls
+        # Disable slow offset controls during ramping
         self.slow_offset_spinbox.setEnabled(False)
         self.slow_offset_slider.setEnabled(False)
         self.slow_offset_fine_slider.setEnabled(False)
-        self.slow_offset_spinbox.setStyleSheet("background-color: #d0d0d0;")
-        self.slow_offset_slider.setStyleSheet("background-color: #d0d0d0;")
-        self.slow_offset_fine_slider.setStyleSheet("background-color: #d0d0d0;")
         
         step = 0.001  # 1mV step
         if direction == 'down':
@@ -1377,33 +1522,21 @@ class CavityControlGUI(QMainWindow):
             if not self.auto_offset_thread_running:
                 break
             
-            # Get current slow offset
+            # Get current slow offset and calculate new value
             current_slow = self.get_mdrec_slow_offset()
-            new_slow = current_slow + step
+            new_slow = max(1.5, min(6.5, current_slow + step))
             
-            # Ensure we stay within valid range
-            new_slow = max(1.5, min(6.5, new_slow))
+            # Temporarily re-enable controls for set_slow_offset to update GUI
+            self.slow_offset_spinbox.setEnabled(True)
+            self.slow_offset_slider.setEnabled(True)
+            self.slow_offset_fine_slider.setEnabled(True)
             
-            # Update slow offset
-            if self.mdrec_lock:
-                self.mdrec_lock.acquire()
-            try:
-                self.mdrec.lock_in.set(f'/{self.device_id}/auxouts/{self.slow_offset}/offset', new_slow)
-            finally:
-                if self.mdrec_lock:
-                    self.mdrec_lock.release()
+            self.set_slow_offset(new_slow)
             
-            # Update GUI
-            self.slow_offset_spinbox.blockSignals(True)
-            self.slow_offset_spinbox.setValue(new_slow)
-            self.slow_offset_spinbox.blockSignals(False)
-            
-            self.slow_offset_slider.blockSignals(True)
-            self.slow_offset_slider.setValue(int(new_slow * 100))
-            self.slow_offset_slider.blockSignals(False)
-            
-            # Update base offset
-            self.slow_offset_base = new_slow
+            # Re-disable controls
+            self.slow_offset_spinbox.setEnabled(False)
+            self.slow_offset_slider.setEnabled(False)
+            self.slow_offset_fine_slider.setEnabled(False)
             
             # Update status
             direction_text = "up" if direction == 'up' else "down"
@@ -1413,13 +1546,10 @@ class CavityControlGUI(QMainWindow):
             # Wait 1 second before next step
             time.sleep(1.0)
         
-        # Unblock slow offset controls
+        # Re-enable slow offset controls after ramping
         self.slow_offset_spinbox.setEnabled(True)
         self.slow_offset_slider.setEnabled(True)
         self.slow_offset_fine_slider.setEnabled(True)
-        self.slow_offset_spinbox.setStyleSheet("")
-        self.slow_offset_slider.setStyleSheet("")
-        self.slow_offset_fine_slider.setStyleSheet("")
         
         self.ramping_in_progress = False
         self.auto_offset_status_label.setText("Ramp complete, monitoring...")
@@ -1456,7 +1586,7 @@ class CavityControlGUI(QMainWindow):
                 self.reflection_label.setText("Error")
             
             # Sleep for 2 seconds, but check frequently if we should stop
-            for _ in range(10):  # Check every 0.1s for 2 seconds total
+            for _ in range(20):  # Check every 0.1s for 2 seconds total
                 if not self.reflection_thread_running:
                     break
                 time.sleep(0.1)
@@ -1465,81 +1595,201 @@ class CavityControlGUI(QMainWindow):
         """Handle window close event to clean up threads"""
         self.stop_reflection_monitoring()
         self.stop_auto_offset_management()
+        self.stop_auto_mode_finder()
         event.accept()
 
-    def get_average_reflection(self):
+    def find_peak_spacing_regularity(self):
+        """Find peak spacing using scope data"""
+        wave, = self.read_scope_data()
+        if (np.max(wave) - np.min(wave)) < self.mid_baseline_threshold:
+            return np.inf  # No signal detected
+        idxs = peakutils.indexes(wave)
+        spacings = idxs[1:] - idxs[:-1]
+        self.log(f'Peak spacings (samples): {spacings}')
+        return np.std(spacings)/np.mean(spacings)
+
+    def mode_finding_routine(self, start_v=2.5, stop_v=5.5, step_v=0.03, delay_s=0.2,
+                             regularity_threshold=0.1, fine_step_mv=10):
+        """Finding the cavity mode"""
+
+        self.log('Reading current function generator settings.')
+        with self.fg_lock:
+            prev_amplitude = self.fg.out_amplitude
+            prev_frequency = self.fg.out_frequency
+
+        is_pid_enabled = self.pid_enable_checkbox.isChecked()
+        is_dither_enabled = self.dither_enable_checkbox.isChecked()
+        is_offset_adjust_enabled = self.auto_offset_checkbox.isChecked()
+        is_reflection_monitor_enabled = self.monitor_reflection_checkbox.isChecked()
+        is_fg_output_enabled = self.output_checkbox.isChecked()
+
+        self.log('Temporarily disabling active routines.')
+        self.disable_pid()
+        if is_dither_enabled:
+            self.dither_enable_checkbox.setChecked(False)
+        if is_offset_adjust_enabled:
+            self.auto_offset_checkbox.setChecked(False)
+        if is_reflection_monitor_enabled:
+            self.monitor_reflection_checkbox.setChecked(False)
+
+        self.log('Setting function generator for mode finding.')
+        self.amplitude_fine_slider.setValue(0)  # No fine adjustment
+        self.amplitude_spinbox.setValue(self.mode_finding_settings['fg_amplitude_mv'])  # 1 V amplitude
+        self.freq_spinbox.setValue(self.mode_finding_settings['fg_amplitude_frequency_hz'])  # 120 Hz frequency
+        self.output_checkbox.setChecked(True)
+
+        # Disable controls during mode finding
+        self.find_mode_button.setEnabled(False)
+        self.dither_enable_checkbox.setEnabled(False)
+        self.auto_offset_checkbox.setEnabled(False)
+        self.pid_enable_checkbox.setEnabled(False)
+        self.monitor_reflection_checkbox.setEnabled(False)
+        self.amplitude_spinbox.setEnabled(False)
+        self.amplitude_fine_slider.setEnabled(False)
+        self.freq_spinbox.setEnabled(False)
+        self.output_checkbox.setEnabled(False)
+        self.slow_offset_slider.setEnabled(False)
+        self.slow_offset_fine_slider.setEnabled(False)
+        self.slow_offset_spinbox.setEnabled(False)
+        self.offset_slider.setEnabled(False)
+        self.fine_offset_slider.setEnabled(False)
+        self.offset_spinbox.setEnabled(False)
+
+        self.log('Starting rough alignment phase...\n\n')
+        self.slow_offset_fine_slider.setValue(0)  # No fine adjustment
+        self.set_slow_offset(start_v)
+        current_offset = start_v
+        time.sleep(1.0)  # Wait for offset to settle
+        found_mode = False
+        while current_offset <= stop_v:
+            regularity = self.find_peak_spacing_regularity()
+            if regularity < regularity_threshold:
+                self.log(f'Regularity threshold met at offset {current_offset:.3f} V (regularity={regularity:.4f}).')
+                found_mode = True
+                break
+            current_offset += step_v
+            self.set_slow_offset(current_offset)
+            time.sleep(delay_s)  # Wait for offset to settle
+
+        self.amplitude_spinbox.setValue(prev_amplitude*1000.0)  # Convert back to mV
+
+        if found_mode:
+            self.log(f'Found mode at offset {current_offset:.3f} V')
+            self.log('Starting fine alignment phase...\n\n')
+            
+            current_offset = 0
+            self.offset_spinbox.setValue(current_offset)
+            while current_offset <= 1.0:
+                regularity = self.find_peak_spacing_regularity()
+                if regularity < regularity_threshold:
+                    self.log(f'Fine regularity threshold met at offset {current_offset:.3f} V (regularity={regularity:.4f}).')
+                    break
+                current_offset += fine_step_mv
+                self.offset_spinbox.setValue(current_offset)
+                time.sleep(delay_s)  # Wait for offset to settle
+        else:
+            self.log(f'No mode found between {start_v:.3f} V and {stop_v:.3f} V')
+            self.log('Restoring previous settings and re-enabling routines.')
+
+        self.freq_spinbox.setValue(prev_frequency)
+        if not is_fg_output_enabled:
+            self.output_checkbox.setChecked(False)
+        if is_pid_enabled:
+            self.enable_pid()
+        if is_dither_enabled:
+            self.dither_enable_checkbox.setChecked(True)
+        if is_offset_adjust_enabled:
+            self.auto_offset_checkbox.setChecked(True)
+        if is_reflection_monitor_enabled:
+            self.monitor_reflection_checkbox.setChecked(True)
+
+        # Enable back controls
+        self.find_mode_button.setEnabled(True)
+        self.dither_enable_checkbox.setEnabled(True)
+        self.auto_offset_checkbox.setEnabled(True)
+        self.pid_enable_checkbox.setEnabled(True)
+        self.monitor_reflection_checkbox.setEnabled(True)
+        self.amplitude_spinbox.setEnabled(True)
+        self.amplitude_fine_slider.setEnabled(True)
+        self.freq_spinbox.setEnabled(True)
+        self.output_checkbox.setEnabled(True)
+        self.slow_offset_slider.setEnabled(True)
+        self.slow_offset_fine_slider.setEnabled(True)
+        self.slow_offset_spinbox.setEnabled(True)
+        self.offset_slider.setEnabled(True)
+        self.fine_offset_slider.setEnabled(True)
+        self.offset_spinbox.setEnabled(True)
+
+    def is_cavity_locked(self):
+        """Check if the cavity is locked based on reflection signal"""
+        mean_val, std_val = self.get_average_reflection(length=16384)
+        return (np.abs(mean_val) < self.locked_reflection_threshold)
+
+    def get_average_reflection(self, length=4096, inputselect=9, sampling=9):
         """Get average reflection signal from the device"""
-        if self.mdrec:
-            # Don't acquire lock here - read_scope_data will handle it
-            wave, dt = self.read_scope_data()
-            return np.mean(wave), np.std(wave)
+        # Don't acquire lock here - read_scope_data will handle it
+        wave, dt = self.read_scope_data(length=length, inputselect=inputselect, sampling=sampling)
+        return np.mean(wave), np.std(wave)
 
     def read_scope_data(self, length=4096, inputselect=9, sampling=9):
         """Read and log current scope data from the device"""
-        if self.mdrec:
-            if self.mdrec_lock:
-                settings = self.read_scope_settings() # Save current settings
-                self.mdrec_lock.acquire()
-            try:
-                self.mdrec.lock_in.set(f'/{self.device_id}/scopes/0/time', sampling)
-                self.mdrec.lock_in.set(f'/{self.device_id}/scopes/0/length', length)
-                self.mdrec.lock_in.set(f'/{self.device_id}/scopes/0/channels/0/inputselect', inputselect)
-                data = get_data_scope(self.mdrec, self.device_id)
-                dt = data[f'/{self.device_id}/scopes/0/wave'][-1][0]['dt']
-                wave = data[f'/{self.device_id}/scopes/0/wave'][-1][0]['wave'][0]
-            finally:
-                # Restore previous settings
-                if self.mdrec_lock:
-                    self.mdrec_lock.release()
-                    self.set_scope_settings(settings)  # Restore previous settings
-            return wave, dt
+        settings = self.read_scope_settings()  # Save current settings
+        with self.mdrec_lock:
+            self.mdrec.lock_in.set(f'/{self.device_id}/scopes/0/time', sampling)
+            self.mdrec.lock_in.set(f'/{self.device_id}/scopes/0/length', length)
+            self.mdrec.lock_in.set(f'/{self.device_id}/scopes/0/channels/0/inputselect', inputselect)
+            data = get_data_scope(self.mdrec, self.device_id)
+            dt = data[f'/{self.device_id}/scopes/0/wave'][-1][0]['dt']
+            wave = data[f'/{self.device_id}/scopes/0/wave'][-1][0]['wave'][0]
+        # Restore previous settings
+        self.set_scope_settings(settings)
+        return wave, dt
 
     def read_scope_settings(self):
         """Read and log current scope settings from the device"""
-        if self.mdrec:
-            if self.mdrec_lock:
-                self.mdrec_lock.acquire()
-            try:
-                sampling = self.mdrec.lock_in.getInt(f'/{self.device_id}/scopes/0/time')
-                length = self.mdrec.lock_in.getInt(f'/{self.device_id}/scopes/0/length')
-                inputselect = self.mdrec.lock_in.getInt(f'/{self.device_id}/scopes/0/channels/0/inputselect')
-                settings = {
-                    'sampling': sampling,
-                    'length': length,
-                    'inputselect': inputselect
-                }
-                self.log(f"Scope settings: {settings}")
-                return settings
-            finally:
-                if self.mdrec_lock:
-                    self.mdrec_lock.release()
+        with self.mdrec_lock:
+            sampling = self.mdrec.lock_in.getInt(f'/{self.device_id}/scopes/0/time')
+            length = self.mdrec.lock_in.getInt(f'/{self.device_id}/scopes/0/length')
+            inputselect = self.mdrec.lock_in.getInt(f'/{self.device_id}/scopes/0/channels/0/inputselect')
+            settings = {
+                'sampling': sampling,
+                'length': length,
+                'inputselect': inputselect
+            }
+            self.log(f"Scope settings: {settings}")
+            return settings
 
     def set_scope_settings(self, settings):
         """Set scope settings on the device"""
-        if self.mdrec:
-            if self.mdrec_lock:
-                self.mdrec_lock.acquire()
-            try:
-                if 'sampling' in settings.keys():
-                    self.mdrec.lock_in.setInt(f'/{self.device_id}/scopes/0/time', settings['sampling'])
-                if 'length' in settings.keys():
-                    self.mdrec.lock_in.setInt(f'/{self.device_id}/scopes/0/length', settings['length'])
-                if 'inputselect' in settings.keys():
-                    self.mdrec.lock_in.setInt(f'/{self.device_id}/scopes/0/channels/0/inputselect', settings['inputselect'])
-                self.log(f"Scope settings updated to: {settings}")
-            finally:
-                if self.mdrec_lock:
-                    self.mdrec_lock.release()
+        with self.mdrec_lock:
+            if 'sampling' in settings.keys():
+                self.mdrec.lock_in.setInt(f'/{self.device_id}/scopes/0/time', settings['sampling'])
+            if 'length' in settings.keys():
+                self.mdrec.lock_in.setInt(f'/{self.device_id}/scopes/0/length', settings['length'])
+            if 'inputselect' in settings.keys():
+                self.mdrec.lock_in.setInt(f'/{self.device_id}/scopes/0/channels/0/inputselect', settings['inputselect'])
+            self.log(f"Scope settings updated to: {settings}")
 
     def log(self, message):
         """Log message if verbose mode is enabled"""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        formatted_message = f"[{timestamp}] {message}"
+        
         if self.verbose:
-            print(message)
+            print(formatted_message)
+        
+        # Always update GUI log display
+        self.log_text_edit.append(formatted_message)
+        # Auto-scroll to bottom
+        self.log_text_edit.verticalScrollBar().setValue(
+            self.log_text_edit.verticalScrollBar().maximum()
+        )
 
 
 # Example usage:
 def main(mdrec=None, fg=None, device_id=None, dither_pid=None, dither_drive_demod=None, 
-         dither_in_demod=None, verbose=False, mdrec_lock=None, fg_lock=None, slow_offset=2):
+         dither_in_demod=None, verbose=False, mdrec_lock=None, fg_lock=None, slow_offset=2, 
+         keep_offset_zero=True, mode_finding_settings=None):
     """Main function to run the Cavity Control GUI"""
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
@@ -1547,7 +1797,7 @@ def main(mdrec=None, fg=None, device_id=None, dither_pid=None, dither_drive_demo
     window = CavityControlGUI(mdrec=mdrec, fg=fg, device_id=device_id, dither_pid=dither_pid,
                               dither_drive_demod=dither_drive_demod, dither_in_demod=dither_in_demod,
                               verbose=verbose, mdrec_lock=mdrec_lock, fg_lock=fg_lock, 
-                              slow_offset=slow_offset)
+                              slow_offset=slow_offset, keep_offset_zero=keep_offset_zero, mode_finding_settings=mode_finding_settings)
     window.show()
     sys.exit(app.exec_())
 
@@ -1558,6 +1808,7 @@ if __name__ == "__main__":
     import threading
 
     verbose = False
+    keep_offset_zero = True
 
     ip_PC = '10.21.217.191'
     ip_fg = '10.21.217.150'
@@ -1567,26 +1818,23 @@ if __name__ == "__main__":
     dither_drive_demod = 2
     dither_in_demod = 3
     slow_offset = 2  # auxout2 corresponds to Aux3 on device
+
+    mode_finding_settings = {
+        'fg_amplitude_mv': 1000.0, 
+        'fg_amplitude_frequency_hz': 120.0
+    }
     
     # Use VISA resource string for function generator
     visa_resource_fg = f"TCPIP0::{ip_fg}::inst0::INSTR"
 
-    dummy_test = False
-
-    if not dummy_test:
-        # Create locks for thread safety
-        mdrec_lock = threading.Lock()
-        fg_lock = threading.Lock()
-        
-        mdrec = zhinst_demod_recorder(ip_PC, devtype='MFLI')
-        fg = SingleOutput(visa_resource_fg)
-    else:
-        mdrec = None 
-        fg = None
-        mdrec_lock = None
-        fg_lock = None
+    # Create locks for thread safety
+    mdrec_lock = threading.Lock()
+    fg_lock = threading.Lock()
+    
+    mdrec = zhinst_demod_recorder(ip_PC, devtype='MFLI')
+    fg = SingleOutput(visa_resource_fg)
 
     main(mdrec=mdrec, fg=fg, device_id=device_id, dither_pid=pid_dither,    
          dither_drive_demod=dither_drive_demod, dither_in_demod=dither_in_demod,
          verbose=verbose, mdrec_lock=mdrec_lock, fg_lock=fg_lock, 
-         slow_offset=slow_offset)
+         slow_offset=slow_offset, keep_offset_zero=keep_offset_zero, mode_finding_settings=mode_finding_settings)
