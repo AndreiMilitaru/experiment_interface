@@ -21,6 +21,8 @@ from mach_zehnder_utils.mach_zehnder_lock import (
 from mach_zehnder_utils.manager_interface import MZManagerInterface
 
 class MachZehnderManager(MZManagerInterface):
+    """Class to manage Mach Zehnder stabilization system."""
+
     def __init__(
         self,
         mdrec,
