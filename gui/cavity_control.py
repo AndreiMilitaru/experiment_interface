@@ -65,14 +65,17 @@ class CavityControlGUI(QMainWindow):
         # Initialize auto-offset management thread control
         self.auto_offset_thread = None
         self.auto_offset_thread_running = False
-        self.ramping_in_progress = False
 
         # Initialize auto mode finder thread control
         self.auto_mode_finder_thread = None
         self.auto_mode_finder_thread_running = False
 
-        # Add flag to prevent overlapping mode finding routines
-        self.mode_finding_in_progress = False
+        # Initialize offset monitor thread control
+        self.offset_monitor_thread = None
+        self.offset_monitor_thread_running = False
+
+        # Add lock to prevent overlapping critical routines (mode finding and offset ramping)
+        self.routine_lock = threading.Lock()
 
         self.mode_finding_settings = mode_finding_settings
         self.mid_baseline_threshold = mid_baseline_threshold
@@ -360,6 +363,15 @@ class CavityControlGUI(QMainWindow):
         self.fine_offset_slider.setValue(0)  # Always start at 0
         self.fine_offset_label.setText("0.0 mV")
         self.fine_offset_slider.blockSignals(False)
+        
+        # Update offset spinbox state based on initial PID enable state
+        self.update_offset_spinbox_state()
+
+        # After all signals are unblocked and offset spinbox state is updated, 
+        # Start offset monitor thread if PID is enabled
+        if self.pid_enable_checkbox.isChecked():
+            self.log("Starting offset monitoring during initialization")
+            self.start_offset_monitoring()
 
     def disable_pid(self):
         """Safely disable PID by triggering checkbox state change"""
@@ -1166,7 +1178,13 @@ class CavityControlGUI(QMainWindow):
         self.update_offset_spinbox_state()
         self.update_status_indicators()
         
-        if not enabled:
+        if enabled:
+            # Start monitoring offset when PID is enabled
+            self.start_offset_monitoring()
+        else:
+            # Stop monitoring when PID is disabled
+            self.stop_offset_monitoring()
+            
             # When disabling PID, read current offset from device and update controls
             with self.mdrec_lock:
                 response = self.mdrec.lock_in.get(f'/{self.device_id}/sigouts/0/offset')
@@ -1459,6 +1477,61 @@ class CavityControlGUI(QMainWindow):
         mode_finding_thread = threading.Thread(target=self.mode_finding_routine, daemon=True)
         mode_finding_thread.start()
 
+    def start_offset_monitoring(self):
+        """Start the background thread for offset monitoring when PID is enabled"""
+        if not self.offset_monitor_thread_running:
+            self.offset_monitor_thread_running = True
+            self.offset_monitor_thread = threading.Thread(target=self._offset_monitor_loop, daemon=True)
+            self.offset_monitor_thread.start()
+            self.log("Offset monitoring started")
+    
+    def stop_offset_monitoring(self):
+        """Stop the background thread for offset monitoring"""
+        if self.offset_monitor_thread_running:
+            self.offset_monitor_thread_running = False
+            if self.offset_monitor_thread:
+                self.offset_monitor_thread.join(timeout=2.0)
+            self.log("Offset monitoring stopped")
+    
+    def _offset_monitor_loop(self):
+        """Background thread loop to monitor and update offset spinbox when PID is enabled"""
+        while self.offset_monitor_thread_running:
+            try:
+                if self.pid_enable_checkbox.isChecked():
+                    # Get current offset from device
+                    offset_value = self.get_mdrec_output_offset()
+                    
+                    # Update spinbox
+                    self.offset_spinbox.blockSignals(True)
+                    self.offset_spinbox.setValue(offset_value)
+                    self.offset_spinbox.blockSignals(False)
+                    
+                    # Reset fine adjustment to 0
+                    self.fine_offset_slider.blockSignals(True)
+                    self.fine_offset_slider.setValue(0)
+                    self.fine_offset_label.setText("0.0 mV")
+                    self.fine_offset_slider.blockSignals(False)
+                    
+                    # Update base offset
+                    self.base_offset = offset_value
+                    
+                    # Update slider
+                    self.offset_slider.blockSignals(True)
+                    self.offset_slider.setValue(int(offset_value * 100))
+                    self.offset_slider.blockSignals(False)
+                    
+                    # Update status display
+                    self.output_value_label.setText(f"{offset_value:.3f} V")
+                    
+            except Exception as e:
+                self.log(f"Error in offset monitor: {e}")
+            
+            # Sleep for 0.5 seconds, but check frequently if we should stop
+            for _ in range(5):  # Check every 0.1s for 0.5 seconds total
+                if not self.offset_monitor_thread_running:
+                    break
+                time.sleep(0.1)
+
     def start_auto_mode_finder(self):
         """Start the background thread for automatic mode finding"""
         if not self.auto_mode_finder_thread_running:
@@ -1483,13 +1556,13 @@ class CavityControlGUI(QMainWindow):
                 if self.pid_enable_checkbox.isChecked():
                     # Check if cavity is actually locked
                     if not self.is_cavity_locked():
-                        for _ in range(10):  # Double-check over 10 seconds
+                        for _ in range(10):  # Double-check over 1 second
                             if not self.auto_mode_finder_thread_running:
                                 break
                             time.sleep(0.1)
-                        if not self.is_cavity_locked() and not self.mode_finding_in_progress:
+                        if not self.is_cavity_locked():
                             self.log("Lock lost! Starting mode finding routine...")
-                            # Don't disable PID here - let mode_finding_routine handle it
+                            self.mode_finding_routine()
             except Exception as e:
                 self.log(f"Error in auto mode finder: {e}")
             
@@ -1541,65 +1614,66 @@ class CavityControlGUI(QMainWindow):
             for _ in range(10):
                 if not self.auto_offset_thread_running:
                     break
+               
                 time.sleep(0.1)
     
     
     def _ramp_slow_offset(self, direction='up'):
         """Ramp the slow offset up or down by 15mV in 1mV steps"""
-        if self.ramping_in_progress:
-            return  # Prevent multiple ramps at once
+        # Try to acquire the routine lock without blocking
+        if not self.routine_lock.acquire(blocking=False):
+            self.log(f"Cannot ramp slow offset - another routine is in progress")
+            return
         
-        self.ramping_in_progress = True
-        
-
-        
-        # Disable slow offset controls during ramping
-        self.slow_offset_spinbox.setEnabled(False)
-        self.slow_offset_slider.setEnabled(False)
-        self.slow_offset_fine_slider.setEnabled(False)
-        
-        step = 0.001  # 1mV step
-        if direction == 'down':
-            step = -step
-        
-        # Perform 15 steps
-        for i in range(15):
-            if not self.auto_offset_thread_running:
-                break
-            
-            # Get current slow offset and calculate new value
-            current_slow = self.get_mdrec_slow_offset()
-            new_slow = max(1.5, min(6.5, current_slow + step))
-            
-            # Temporarily re-enable controls for set_slow_offset to update GUI
-            self.slow_offset_spinbox.setEnabled(True)
-            self.slow_offset_slider.setEnabled(True)
-            self.slow_offset_fine_slider.setEnabled(True)
-            
-            self.set_slow_offset(new_slow)
-            
-            # Re-disable controls
+        try:
+            # Disable slow offset controls during ramping
             self.slow_offset_spinbox.setEnabled(False)
             self.slow_offset_slider.setEnabled(False)
             self.slow_offset_fine_slider.setEnabled(False)
             
-            # Update status
-            direction_text = "up" if direction == 'up' else "down"
-            self.auto_offset_status_label.setText(f"Ramping {direction_text}: {new_slow:.3f}V (step {i+1}/15)")
-            self.log(f"Ramping {direction_text}: step {i+1}/15, slow_offset = {new_slow:.3f}V")
+            step = 0.001  # 1mV step
+            if direction == 'down':
+                step = -step
             
-            # Wait 1 second before next step
-            time.sleep(1.0)
-        
-        # Re-enable slow offset controls after ramping
-        self.slow_offset_spinbox.setEnabled(True)
-        self.slow_offset_slider.setEnabled(True)
-        self.slow_offset_fine_slider.setEnabled(True)
-        
-        self.ramping_in_progress = False
-        self.auto_offset_status_label.setText("Ramp complete, monitoring...")
-        self.log(f"Ramping {direction} complete")
-    
+            # Perform 15 steps
+            for i in range(15):
+                if not self.auto_offset_thread_running:
+                    break
+                
+                # Get current slow offset and calculate new value
+                current_slow = self.get_mdrec_slow_offset()
+                new_slow = max(1.5, min(6.5, current_slow + step))
+                
+                # Temporarily re-enable controls for set_slow_offset to update GUI
+                self.slow_offset_spinbox.setEnabled(True)
+                self.slow_offset_slider.setEnabled(True)
+                self.slow_offset_fine_slider.setEnabled(True)
+                
+                self.set_slow_offset(new_slow)
+                
+                # Re-disable controls
+                self.slow_offset_spinbox.setEnabled(False)
+                self.slow_offset_slider.setEnabled(False)
+                self.slow_offset_fine_slider.setEnabled(False)
+                
+                # Update status
+                direction_text = "up" if direction == 'up' else "down"
+                self.auto_offset_status_label.setText(f"Ramping {direction_text}: {new_slow:.3f}V (step {i+1}/15)")
+                self.log(f"Ramping {direction_text}: step {i+1}/15, slow_offset = {new_slow:.3f}V")
+                
+                # Wait 1 second before next step
+                time.sleep(1.0)
+            
+            # Re-enable slow offset controls after ramping
+            self.slow_offset_spinbox.setEnabled(True)
+            self.slow_offset_slider.setEnabled(True)
+            self.slow_offset_fine_slider.setEnabled(True)
+            
+            self.auto_offset_status_label.setText("Ramp complete, monitoring...")
+            self.log(f"Ramping {direction} complete")
+        finally:
+            self.routine_lock.release()
+
     def start_reflection_monitoring(self):
         """Start the background thread for reflection monitoring"""
         if not self.reflection_thread_running:
@@ -1641,6 +1715,7 @@ class CavityControlGUI(QMainWindow):
         self.stop_reflection_monitoring()
         self.stop_auto_offset_management()
         self.stop_auto_mode_finder()
+        self.stop_offset_monitoring()
         event.accept()
 
     def number_of_peaks(self, wave):
@@ -1676,155 +1751,165 @@ class CavityControlGUI(QMainWindow):
 
     def mode_finding_routine(self, step_v=0.01, delay_s=0.1, regularity_threshold=0.3, fine_step=0.01, fine_regularity_threshold=0.2):
         """Finding the cavity mode"""
-
-        start_v = self.start_v_spinbox.value()
-        stop_v = self.stop_v_spinbox.value()
-        self.log('Reading current function generator settings.')
-        with self.fg_lock:
-            prev_amplitude = self.fg.out_amplitude
-            prev_frequency = self.fg.out_frequency
-
-        self.log(f'Function generator current amplitude: {prev_amplitude*1000.0:.1f} mV, frequency: {prev_frequency:.1f} Hz')
-
-        is_pid_enabled = self.pid_enable_checkbox.isChecked()
-        is_dither_enabled = self.dither_enable_checkbox.isChecked()
-        is_offset_adjust_enabled = self.auto_offset_checkbox.isChecked()
-        is_reflection_monitor_enabled = self.monitor_reflection_checkbox.isChecked()
-        is_fg_output_enabled = self.output_checkbox.isChecked()
-        is_mode_finding_enabled = self.auto_mode_finder_checkbox.isChecked()
-
-        self.log('Temporarily disabling active routines.')
+        # Try to acquire the routine lock without blocking
+        if not self.routine_lock.acquire(blocking=False):
+            self.log("Cannot start mode finding - another routine is in progress")
+            return
         
-        # Disable PID first (uses its own thread-safe method)
-        if is_pid_enabled:
-            self.disable_pid()
-        
-        # Use thread-safe GUI updates for other checkboxes
-        QMetaObject.invokeMethod(self.dither_enable_checkbox, "setChecked", Qt.BlockingQueuedConnection, Q_ARG(bool, False))
-        QMetaObject.invokeMethod(self.auto_offset_checkbox, "setChecked", Qt.BlockingQueuedConnection, Q_ARG(bool, False))
-        QMetaObject.invokeMethod(self.monitor_reflection_checkbox, "setChecked", Qt.BlockingQueuedConnection, Q_ARG(bool, False))
-        QMetaObject.invokeMethod(self.auto_mode_finder_checkbox, "setChecked", Qt.BlockingQueuedConnection, Q_ARG(bool, False))
+        try:
+            start_v = self.start_v_spinbox.value()
+            stop_v = self.stop_v_spinbox.value()
+            self.log('Reading current function generator settings.')
+            with self.fg_lock:
+                prev_amplitude = self.fg.out_amplitude
+                prev_frequency = self.fg.out_frequency
 
-        self.log('Setting function generator for mode finding.')
-        
-        # Thread-safe GUI updates for FG settings
-        QMetaObject.invokeMethod(self.amplitude_fine_slider, "setValue", Qt.BlockingQueuedConnection, Q_ARG(int, 0))
-        QMetaObject.invokeMethod(self.amplitude_spinbox, "setValue", Qt.BlockingQueuedConnection, Q_ARG(float, self.mode_finding_settings['fg_amplitude_mv']))
-        QMetaObject.invokeMethod(self.freq_spinbox, "setValue", Qt.BlockingQueuedConnection, Q_ARG(float, self.mode_finding_settings['fg_amplitude_frequency_hz']))
-        QMetaObject.invokeMethod(self.output_checkbox, "setChecked", Qt.BlockingQueuedConnection, Q_ARG(bool, True))
+            self.log(f'Function generator current amplitude: {prev_amplitude*1000.0:.1f} mV, frequency: {prev_frequency:.1f} Hz')
 
-        # Disable controls during mode finding - thread-safe
-        for widget in [self.auto_mode_finder_checkbox, self.find_mode_button, self.dither_enable_checkbox,
-                       self.auto_offset_checkbox, self.pid_enable_checkbox, self.monitor_reflection_checkbox,
-                       self.amplitude_spinbox, self.amplitude_fine_slider, self.freq_spinbox, self.output_checkbox,
-                       self.slow_offset_slider, self.slow_offset_fine_slider, self.slow_offset_spinbox,
-                       self.offset_slider, self.fine_offset_slider, self.offset_spinbox]:
-            QMetaObject.invokeMethod(widget, "setEnabled", Qt.BlockingQueuedConnection, Q_ARG(bool, False))
+            is_pid_enabled = self.pid_enable_checkbox.isChecked()
+            is_dither_enabled = self.dither_enable_checkbox.isChecked()
+            is_offset_adjust_enabled = self.auto_offset_checkbox.isChecked()
+            is_reflection_monitor_enabled = self.monitor_reflection_checkbox.isChecked()
+            is_fg_output_enabled = self.output_checkbox.isChecked()
+            is_mode_finding_enabled = self.auto_mode_finder_checkbox.isChecked()
 
-        self.log('Starting rough alignment phase...\n\n')
-        
-        # Reset fine adjustment
-        QMetaObject.invokeMethod(self.slow_offset_fine_slider, "setValue", Qt.BlockingQueuedConnection, Q_ARG(int, 0))
-        
-        found_mode = False
-        wave, dt = self.read_scope_data(length=16384)
-        num_peaks = self.number_of_peaks(wave=wave)
-        if num_peaks >= 5:
-            self.log(f'Initial number of peaks at start offset {start_v:.3f} V is {num_peaks}, starting regularity check.')
-            regularity = self.find_peak_spacing_regularity(wave=wave)
-            if regularity < regularity_threshold:
-                self.log(f'Initial regularity threshold met at offset {start_v:.3f} V (regularity={regularity:.4f}).')
-                found_mode = True
-            else:
-                prev_regularity = regularity
-                current_offset = self.slow_offset_spinbox.value()
-                dir = 1 
-                new_offset = current_offset + dir*step_v
-                QMetaObject.invokeMethod(self.slow_offset_spinbox, "setValue", Qt.BlockingQueuedConnection, Q_ARG(float, new_offset))
-                wave, dt = self.read_scope_data(length=16384)
+            self.log('Temporarily disabling active routines.')
+            
+            # Disable PID first (uses its own thread-safe method)
+            if is_pid_enabled:
+                self.disable_pid()
+            
+            # Use thread-safe GUI updates for other checkboxes
+            QMetaObject.invokeMethod(self.dither_enable_checkbox, "setChecked", Qt.BlockingQueuedConnection, Q_ARG(bool, False))
+            QMetaObject.invokeMethod(self.auto_offset_checkbox, "setChecked", Qt.BlockingQueuedConnection, Q_ARG(bool, False))
+            QMetaObject.invokeMethod(self.monitor_reflection_checkbox, "setChecked", Qt.BlockingQueuedConnection, Q_ARG(bool, False))
+            QMetaObject.invokeMethod(self.auto_mode_finder_checkbox, "setChecked", Qt.BlockingQueuedConnection, Q_ARG(bool, False))
+
+            self.log('Setting function generator for mode finding.')
+            
+            # Thread-safe GUI updates for FG settings
+            QMetaObject.invokeMethod(self.amplitude_fine_slider, "setValue", Qt.BlockingQueuedConnection, Q_ARG(int, 0))
+            QMetaObject.invokeMethod(self.amplitude_spinbox, "setValue", Qt.BlockingQueuedConnection, Q_ARG(float, self.mode_finding_settings['fg_amplitude_mv']))
+            QMetaObject.invokeMethod(self.freq_spinbox, "setValue", Qt.BlockingQueuedConnection, Q_ARG(float, self.mode_finding_settings['fg_amplitude_frequency_hz']))
+            QMetaObject.invokeMethod(self.output_checkbox, "setChecked", Qt.BlockingQueuedConnection, Q_ARG(bool, True))
+
+            # Disable controls during mode finding - thread-safe
+            for widget in [self.auto_mode_finder_checkbox, self.find_mode_button, self.dither_enable_checkbox,
+                        self.auto_offset_checkbox, self.pid_enable_checkbox, self.monitor_reflection_checkbox,
+                        self.amplitude_spinbox, self.amplitude_fine_slider, self.freq_spinbox, self.output_checkbox,
+                        self.slow_offset_slider, self.slow_offset_fine_slider, self.slow_offset_spinbox,
+                        self.offset_slider, self.fine_offset_slider, self.offset_spinbox]:
+                QMetaObject.invokeMethod(widget, "setEnabled", Qt.BlockingQueuedConnection, Q_ARG(bool, False))
+
+            self.log('Starting rough alignment phase...\n\n')
+            
+            # Reset fine adjustment
+            QMetaObject.invokeMethod(self.slow_offset_fine_slider, "setValue", Qt.BlockingQueuedConnection, Q_ARG(int, 0))
+            
+            found_mode = False
+            wave, dt = self.read_scope_data(length=16384)
+            num_peaks = self.number_of_peaks(wave=wave)
+            if num_peaks >= 5:
+                self.log(f'Initial number of peaks at start offset {start_v:.3f} V is {num_peaks}, starting regularity check.')
                 regularity = self.find_peak_spacing_regularity(wave=wave)
-                if regularity > prev_regularity:
-                    dir = -1  # Reverse direction
-                attempts = 0
-                while regularity >= regularity_threshold and current_offset <= stop_v and attempts < 10:
-                    current_offset += dir*step_v
-                    QMetaObject.invokeMethod(self.slow_offset_spinbox, "setValue", Qt.BlockingQueuedConnection, Q_ARG(float, current_offset))
-                    time.sleep(delay_s)
+                if regularity < regularity_threshold:
+                    self.log(f'Initial regularity threshold met at offset {start_v:.3f} V (regularity={regularity:.4f}).')
+                    found_mode = True
+                else:
+                    prev_regularity = regularity
+                    current_offset = self.slow_offset_spinbox.value()
+                    dir = 1 
+                    new_offset = current_offset + dir*step_v
+                    QMetaObject.invokeMethod(self.slow_offset_spinbox, "setValue", Qt.BlockingQueuedConnection, Q_ARG(float, new_offset))
+                    wave, dt = self.read_scope_data(length=16384)
+                    regularity = self.find_peak_spacing_regularity(wave=wave)
+                    if regularity > prev_regularity:
+                        dir = -1  # Reverse direction
+                    attempts = 0
+                    while regularity >= regularity_threshold and current_offset <= stop_v and attempts < 10:
+                        current_offset += dir*step_v
+                        QMetaObject.invokeMethod(self.slow_offset_spinbox, "setValue", Qt.BlockingQueuedConnection, Q_ARG(float, current_offset))
+                        time.sleep(delay_s)
+                        wave, dt = self.read_scope_data(length=16384)
+                        regularity = self.find_peak_spacing_regularity(wave=wave)
+                        if regularity < regularity_threshold:
+                            self.log(f'Regularity threshold met at offset {current_offset:.3f} V (regularity={regularity:.4f}).')
+                            found_mode = True
+                            break
+                        attempts += 1
+
+            # Set initial slow offset
+            QMetaObject.invokeMethod(self.slow_offset_spinbox, "setValue", Qt.BlockingQueuedConnection, Q_ARG(float, start_v))
+            current_offset = start_v
+            time.sleep(1.0)  # Wait for offset to settle
+
+            if not found_mode:
+                while current_offset <= stop_v:
                     wave, dt = self.read_scope_data(length=16384)
                     regularity = self.find_peak_spacing_regularity(wave=wave)
                     if regularity < regularity_threshold:
                         self.log(f'Regularity threshold met at offset {current_offset:.3f} V (regularity={regularity:.4f}).')
                         found_mode = True
                         break
-                    attempts += 1
+                    current_offset += step_v
+                    QMetaObject.invokeMethod(self.slow_offset_spinbox, "setValue", Qt.BlockingQueuedConnection, Q_ARG(float, current_offset))
+                    time.sleep(delay_s)
 
-        # Set initial slow offset
-        QMetaObject.invokeMethod(self.slow_offset_spinbox, "setValue", Qt.BlockingQueuedConnection, Q_ARG(float, start_v))
-        current_offset = start_v
-        time.sleep(1.0)  # Wait for offset to settle
+            # Restore amplitude
+            QMetaObject.invokeMethod(self.amplitude_spinbox, "setValue", Qt.BlockingQueuedConnection, Q_ARG(float, prev_amplitude*1000.0))
 
-        if not found_mode:
-            while current_offset <= stop_v:
-                wave, dt = self.read_scope_data(length=16384)
-                regularity = self.find_peak_spacing_regularity(wave=wave)
-                if regularity < regularity_threshold:
-                    self.log(f'Regularity threshold met at offset {current_offset:.3f} V (regularity={regularity:.4f}).')
-                    found_mode = True
-                    break
-                current_offset += step_v
-                QMetaObject.invokeMethod(self.slow_offset_spinbox, "setValue", Qt.BlockingQueuedConnection, Q_ARG(float, current_offset))
-                time.sleep(delay_s)
-
-        # Restore amplitude
-        QMetaObject.invokeMethod(self.amplitude_spinbox, "setValue", Qt.BlockingQueuedConnection, Q_ARG(float, prev_amplitude*1000.0))
-
-        if found_mode:
-            self.log(f'Found mode at offset {current_offset:.3f} V')
-            self.log('Starting fine alignment phase...\n\n')
-            
-            initial_offset = self.offset_spinbox.value()
-            current_offset = max(0, initial_offset - 0.15)
-            QMetaObject.invokeMethod(self.offset_spinbox, "setValue", Qt.BlockingQueuedConnection, Q_ARG(float, current_offset))
-            time.sleep(0.2)
-            
-            while current_offset <= min(1.0, initial_offset + 0.15):
-                wave, dt = self.read_scope_data(length=16384)
-                regularity = self.find_peak_spacing_regularity(wave=wave)
-                if regularity < fine_regularity_threshold:
-                    self.log(f'Fine regularity threshold met at offset {current_offset:.3f} V (regularity={regularity:.4f}).')
-                    break
-                current_offset += fine_step
+            if found_mode:
+                self.log(f'Found mode at offset {current_offset:.3f} V')
+                self.log('Starting fine alignment phase...\n\n')
+                
+                initial_offset = self.offset_spinbox.value()
+                current_offset = max(0, initial_offset - 0.15)
                 QMetaObject.invokeMethod(self.offset_spinbox, "setValue", Qt.BlockingQueuedConnection, Q_ARG(float, current_offset))
-                time.sleep(delay_s)
-        else:
-            self.log(f'No mode found between {start_v:.3f} V and {stop_v:.3f} V')
-            self.log('Restoring previous settings and re-enabling routines.')
+                time.sleep(0.2)
+                
+                while current_offset <= min(1.0, initial_offset + 0.15):
+                    wave, dt = self.read_scope_data(length=16384)
+                    regularity = self.find_peak_spacing_regularity(wave=wave)
+                    if regularity < fine_regularity_threshold:
+                        self.log(f'Fine regularity threshold met at offset {current_offset:.3f} V (regularity={regularity:.4f}).')
+                        break
+                    current_offset += fine_step
+                    QMetaObject.invokeMethod(self.offset_spinbox, "setValue", Qt.BlockingQueuedConnection, Q_ARG(float, current_offset))
+                    time.sleep(delay_s)
+            else:
+                self.log(f'No mode found between {start_v:.3f} V and {stop_v:.3f} V')
+                self.log('Restoring previous settings and re-enabling routines.')
 
-        # Restore settings - thread-safe
-        QMetaObject.invokeMethod(self.freq_spinbox, "setValue", Qt.BlockingQueuedConnection, Q_ARG(float, prev_frequency))
-        
-        if not is_fg_output_enabled:
-            QMetaObject.invokeMethod(self.output_checkbox, "setChecked", Qt.BlockingQueuedConnection, Q_ARG(bool, False))
-        if is_dither_enabled:
-            QMetaObject.invokeMethod(self.dither_enable_checkbox, "setChecked", Qt.BlockingQueuedConnection, Q_ARG(bool, True))
-        if is_offset_adjust_enabled:
-            QMetaObject.invokeMethod(self.auto_offset_checkbox, "setChecked", Qt.BlockingQueuedConnection, Q_ARG(bool, True))
-        if is_reflection_monitor_enabled:
-            QMetaObject.invokeMethod(self.monitor_reflection_checkbox, "setChecked", Qt.BlockingQueuedConnection, Q_ARG(bool, True))
-        if is_mode_finding_enabled:
-            QMetaObject.invokeMethod(self.auto_mode_finder_checkbox, "setChecked", Qt.BlockingQueuedConnection, Q_ARG(bool, True))
-        
-        # Re-enable PID last (uses its own thread-safe method)
-        if is_pid_enabled:
-            self.enable_pid()
+            # Restore settings - thread-safe
+            QMetaObject.invokeMethod(self.freq_spinbox, "setValue", Qt.BlockingQueuedConnection, Q_ARG(float, prev_frequency))
+            
+            if not is_fg_output_enabled:
+                QMetaObject.invokeMethod(self.output_checkbox, "setChecked", Qt.BlockingQueuedConnection, Q_ARG(bool, False))
+            if is_dither_enabled:
+                QMetaObject.invokeMethod(self.dither_enable_checkbox, "setChecked", Qt.BlockingQueuedConnection, Q_ARG(bool, True))
+            if is_offset_adjust_enabled:
+                QMetaObject.invokeMethod(self.auto_offset_checkbox, "setChecked", Qt.BlockingQueuedConnection, Q_ARG(bool, True))
+            if is_reflection_monitor_enabled:
+                QMetaObject.invokeMethod(self.monitor_reflection_checkbox, "setChecked", Qt.BlockingQueuedConnection, Q_ARG(bool, True))
+            if is_mode_finding_enabled:
+                QMetaObject.invokeMethod(self.auto_mode_finder_checkbox, "setChecked", Qt.BlockingQueuedConnection, Q_ARG(bool, True))
+            
+            # Re-enable PID last (uses its own thread-safe method)
+            if is_pid_enabled:
+                self.enable_pid()
+                # Explicitly start offset monitoring after enabling PID
+                self.start_offset_monitoring()
 
-        # Enable back controls - thread-safe
-        for widget in [self.auto_mode_finder_checkbox, self.find_mode_button, self.dither_enable_checkbox,
-                       self.auto_offset_checkbox, self.pid_enable_checkbox, self.monitor_reflection_checkbox,
-                       self.amplitude_spinbox, self.amplitude_fine_slider, self.freq_spinbox, self.output_checkbox,
-                       self.slow_offset_slider, self.slow_offset_fine_slider, self.slow_offset_spinbox,
-                       self.offset_slider, self.fine_offset_slider, self.offset_spinbox]:
-            QMetaObject.invokeMethod(widget, "setEnabled", Qt.BlockingQueuedConnection, Q_ARG(bool, True))
+            # Enable back controls - thread-safe
+            for widget in [self.auto_mode_finder_checkbox, self.find_mode_button, self.dither_enable_checkbox,
+                        self.auto_offset_checkbox, self.pid_enable_checkbox, self.monitor_reflection_checkbox,
+                        self.amplitude_spinbox, self.amplitude_fine_slider, self.freq_spinbox, self.output_checkbox,
+                        self.slow_offset_slider, self.slow_offset_fine_slider, self.slow_offset_spinbox,
+                        self.offset_slider, self.fine_offset_slider, self.offset_spinbox]:
+                QMetaObject.invokeMethod(widget, "setEnabled", Qt.BlockingQueuedConnection, Q_ARG(bool, True))
+                
+        finally:
+            self.routine_lock.release()
 
     def is_cavity_locked(self):
         """Check if the cavity is locked based on reflection signal"""
