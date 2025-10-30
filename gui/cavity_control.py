@@ -1501,36 +1501,33 @@ class CavityControlGUI(QMainWindow):
                     # Get current offset from device
                     offset_value = self.get_mdrec_output_offset()
                     
-                    # Update spinbox
-                    self.offset_spinbox.blockSignals(True)
-                    self.offset_spinbox.setValue(offset_value)
-                    self.offset_spinbox.blockSignals(False)
+                    # Batch all GUI updates together
+                    updates = {
+                        (self.offset_spinbox, "setValue"): offset_value,
+                        (self.fine_offset_slider, "setValue"): 0,
+                        (self.fine_offset_label, "setText"): "0.0 mV",
+                        (self.offset_slider, "setValue"): int(offset_value * 100),
+                        (self.output_value_label, "setText"): f"{offset_value:.3f} V"
+                    }
                     
-                    # Reset fine adjustment to 0
-                    self.fine_offset_slider.blockSignals(True)
-                    self.fine_offset_slider.setValue(0)
-                    self.fine_offset_label.setText("0.0 mV")
-                    self.fine_offset_slider.blockSignals(False)
+                    # Update GUI in a single event loop cycle
+                    for (widget, method), value in updates.items():
+                        QMetaObject.invokeMethod(widget, method,
+                                               Qt.QueuedConnection,
+                                               Q_ARG(type(value), value))
                     
-                    # Update base offset
+                    # Update instance variable
                     self.base_offset = offset_value
-                    
-                    # Update slider
-                    self.offset_slider.blockSignals(True)
-                    self.offset_slider.setValue(int(offset_value * 100))
-                    self.offset_slider.blockSignals(False)
-                    
-                    # Update status display
-                    self.output_value_label.setText(f"{offset_value:.3f} V")
                     
             except Exception as e:
                 self.log(f"Error in offset monitor: {e}")
-            
-            # Sleep for 0.5 seconds, but check frequently if we should stop
-            for _ in range(5):  # Check every 0.1s for 0.5 seconds total
+        
+            # Sleep with shorter intervals and process events
+            for _ in range(5):
                 if not self.offset_monitor_thread_running:
                     break
                 time.sleep(0.1)
+                QApplication.processEvents()  # Allow GUI to process events
 
     def start_auto_mode_finder(self):
         """Start the background thread for automatic mode finding"""
@@ -1749,7 +1746,7 @@ class CavityControlGUI(QMainWindow):
         # self.log(f'Peak spacings (samples): {spacings}')
         return np.std(spacings) / np.mean(spacings)
 
-    def mode_finding_routine(self, step_v=0.01, delay_s=0.1, regularity_threshold=0.3, fine_step=0.01, fine_regularity_threshold=0.2):
+    def mode_finding_routine(self, step_v=0.01, delay_s=0.1, regularity_threshold=0.25, fine_step=0.01, fine_regularity_threshold=0.2):
         """Finding the cavity mode"""
         # Try to acquire the routine lock without blocking
         if not self.routine_lock.acquire(blocking=False):
@@ -1757,8 +1754,14 @@ class CavityControlGUI(QMainWindow):
             return
         
         try:
-            start_v = self.start_v_spinbox.value()
-            stop_v = self.stop_v_spinbox.value()
+            # Replace all BlockingQueuedConnection with QueuedConnection
+            def safe_update(widget, method, *args):
+                QMetaObject.invokeMethod(widget, method, 
+                                       Qt.QueuedConnection,  # Changed from BlockingQueuedConnection
+                                       *[Q_ARG(type(arg), arg) for arg in args])
+                QApplication.processEvents()  # Allow GUI to process events
+                time.sleep(0.01)  # Small delay to prevent GUI lockup
+            
             self.log('Reading current function generator settings.')
             with self.fg_lock:
                 prev_amplitude = self.fg.out_amplitude
@@ -1780,19 +1783,19 @@ class CavityControlGUI(QMainWindow):
                 self.disable_pid()
             
             # Use thread-safe GUI updates for other checkboxes
-            QMetaObject.invokeMethod(self.dither_enable_checkbox, "setChecked", Qt.BlockingQueuedConnection, Q_ARG(bool, False))
-            QMetaObject.invokeMethod(self.auto_offset_checkbox, "setChecked", Qt.BlockingQueuedConnection, Q_ARG(bool, False))
-            QMetaObject.invokeMethod(self.monitor_reflection_checkbox, "setChecked", Qt.BlockingQueuedConnection, Q_ARG(bool, False))
-            QMetaObject.invokeMethod(self.auto_mode_finder_checkbox, "setChecked", Qt.BlockingQueuedConnection, Q_ARG(bool, False))
-
+            safe_update(self.dither_enable_checkbox, "setChecked", False)
+            safe_update(self.auto_offset_checkbox, "setChecked", False)
+            safe_update(self.monitor_reflection_checkbox, "setChecked", False)
+            safe_update(self.auto_mode_finder_checkbox, "setChecked", False)
+            
             self.log('Setting function generator for mode finding.')
             
             # Thread-safe GUI updates for FG settings
-            QMetaObject.invokeMethod(self.amplitude_fine_slider, "setValue", Qt.BlockingQueuedConnection, Q_ARG(int, 0))
-            QMetaObject.invokeMethod(self.amplitude_spinbox, "setValue", Qt.BlockingQueuedConnection, Q_ARG(float, self.mode_finding_settings['fg_amplitude_mv']))
-            QMetaObject.invokeMethod(self.freq_spinbox, "setValue", Qt.BlockingQueuedConnection, Q_ARG(float, self.mode_finding_settings['fg_amplitude_frequency_hz']))
-            QMetaObject.invokeMethod(self.output_checkbox, "setChecked", Qt.BlockingQueuedConnection, Q_ARG(bool, True))
-
+            safe_update(self.amplitude_fine_slider, "setValue", 0)
+            safe_update(self.amplitude_spinbox, "setValue", self.mode_finding_settings['fg_amplitude_mv'])
+            safe_update(self.freq_spinbox, "setValue", self.mode_finding_settings['fg_amplitude_frequency_hz'])
+            safe_update(self.output_checkbox, "setChecked", True)
+            
             # Disable controls during mode finding - thread-safe
             for widget in [self.auto_mode_finder_checkbox, self.find_mode_button, self.dither_enable_checkbox,
                         self.auto_offset_checkbox, self.pid_enable_checkbox, self.monitor_reflection_checkbox,
@@ -1826,7 +1829,7 @@ class CavityControlGUI(QMainWindow):
                     if regularity > prev_regularity:
                         dir = -1  # Reverse direction
                     attempts = 0
-                    while regularity >= regularity_threshold and current_offset <= stop_v and attempts < 10:
+                    while regularity >= regularity_threshold and attempts < 10:
                         current_offset += dir*step_v
                         QMetaObject.invokeMethod(self.slow_offset_spinbox, "setValue", Qt.BlockingQueuedConnection, Q_ARG(float, current_offset))
                         time.sleep(delay_s)
@@ -1838,12 +1841,11 @@ class CavityControlGUI(QMainWindow):
                             break
                         attempts += 1
 
-            # Set initial slow offset
-            QMetaObject.invokeMethod(self.slow_offset_spinbox, "setValue", Qt.BlockingQueuedConnection, Q_ARG(float, start_v))
-            current_offset = start_v
-            time.sleep(1.0)  # Wait for offset to settle
-
             if not found_mode:
+                # Set initial slow offset
+                QMetaObject.invokeMethod(self.slow_offset_spinbox, "setValue", Qt.BlockingQueuedConnection, Q_ARG(float, start_v))
+                current_offset = start_v
+                time.sleep(1.0)  # Wait for offset to settle
                 while current_offset <= stop_v:
                     wave, dt = self.read_scope_data(length=16384)
                     regularity = self.find_peak_spacing_regularity(wave=wave)
