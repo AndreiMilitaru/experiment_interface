@@ -25,7 +25,7 @@ from PyQt5.QtWidgets import (
     QGroupBox, QGridLayout, QFrame, QSizePolicy, QTabWidget,
     QSlider, QTextEdit
 )
-from PyQt5.QtCore import Qt, pyqtSlot, pyqtSignal, QObject
+from PyQt5.QtCore import Qt, pyqtSlot, pyqtSignal, QObject, QMetaObject, Q_ARG
 from PyQt5.QtGui import QFont, QIcon
 
 
@@ -71,6 +71,9 @@ class CavityControlGUI(QMainWindow):
         self.auto_mode_finder_thread = None
         self.auto_mode_finder_thread_running = False
 
+        # Add flag to prevent overlapping mode finding routines
+        self.mode_finding_in_progress = False
+
         self.mode_finding_settings = mode_finding_settings
         self.mid_baseline_threshold = mid_baseline_threshold
         # Initialize UI
@@ -80,20 +83,18 @@ class CavityControlGUI(QMainWindow):
         """Initialize the user interface"""
         self.setWindowTitle('Narrow-linewidth cavity control')
         # Reduce the window width to half (from 800 to 400)
-        self.setGeometry(1050, 200, 350, 500)
+        self.setGeometry(1000, 50, 350, 500)
 
         # Create central widget and main layout
         central_widget = QWidget()
         main_layout = QVBoxLayout(central_widget)
 
-        # Create three main panels
+        # Create two main panels
         top_panel = self.create_controls_panel()
-        log_panel = self.create_log_panel()
         bottom_panel = self.create_monitoring_panel()
 
         # Add panels to main layout
-        main_layout.addWidget(top_panel, 3)  # Control panel takes most space
-        main_layout.addWidget(log_panel, 1)  # Log panel same size as status
+        main_layout.addWidget(top_panel, 4)  # Control panel takes more space
         main_layout.addWidget(bottom_panel, 1)  # Status panel
 
         # Set central widget
@@ -282,6 +283,8 @@ class CavityControlGUI(QMainWindow):
         
         # Set controls with actual value from device
         self.slow_offset_spinbox.setValue(slow_offset_value)
+        self.start_v_spinbox.setValue(slow_offset_value-0.25)
+        self.stop_v_spinbox.setValue(slow_offset_value+0.25)
         self.slow_offset_slider.setValue(int(slow_offset_value * 100))
         self.slow_offset_fine_slider.setValue(0)  # Fine adjustment starts at 0
         self.slow_offset_fine_label.setText("0.0 mV")
@@ -397,8 +400,8 @@ class CavityControlGUI(QMainWindow):
         self.slow_offset_slider.blockSignals(True)
         self.slow_offset_fine_slider.blockSignals(True)
         
-        # Update spinbox
-        self.slow_offset_spinbox.setValue(value*1000)  # Convert V to mV for spinbox
+        # Update spinbox (value is already in volts)
+        self.slow_offset_spinbox.setValue(value)  # Fixed: removed *1000
         
         # Update slider (convert voltage to slider value)
         self.slow_offset_slider.setValue(int(value * 100))
@@ -420,28 +423,29 @@ class CavityControlGUI(QMainWindow):
         pid_tab = self.create_pid_controls()
         fg_tab = self.create_fg_controls()
         demod_tab = self.create_demod_controls()
+        log_tab = self.create_log_tab()
         
         # Add tabs to panel
         panel.addTab(pid_tab, "PID Controls")
         panel.addTab(fg_tab, "Function Generator")
         panel.addTab(demod_tab, "Demodulation Settings")
+        panel.addTab(log_tab, "Log")
         
         return panel
     
-    def create_log_panel(self):
-        """Create the logging panel"""
-        panel = QGroupBox("Log Messages")
-        layout = QVBoxLayout(panel)
+    def create_log_tab(self):
+        """Create the log tab"""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
         
         # Create text edit for log messages (read-only)
         self.log_text_edit = QTextEdit()
         self.log_text_edit.setReadOnly(True)
-        self.log_text_edit.setMaximumHeight(150)  # Limit height
         self.log_text_edit.setStyleSheet("""
             QTextEdit {
                 background-color: #f5f5f5;
                 font-family: Consolas, Monaco, monospace;
-                font-size: 9pt;
+                font-size: 8pt;
             }
         """)
         
@@ -453,7 +457,7 @@ class CavityControlGUI(QMainWindow):
         clear_button.setMaximumWidth(100)
         layout.addWidget(clear_button)
         
-        return panel
+        return widget
     
     def clear_log(self):
         """Clear the log display"""
@@ -467,7 +471,7 @@ class CavityControlGUI(QMainWindow):
         layout = QVBoxLayout(widget)
         
         # PID Parameters Group
-        pid_group = QGroupBox("PID Parameters")
+        pid_group = QGroupBox("Lock Control")
         pid_layout = QGridLayout()
 
         # P Gain
@@ -481,6 +485,16 @@ class CavityControlGUI(QMainWindow):
         self.p_gain_spinbox.valueChanged.connect(self.on_p_gain_changed)
         pid_layout.addWidget(self.p_gain_spinbox, 0, 1)
 
+        # Start V (for mode finding) - next to P Gain
+        pid_layout.addWidget(QLabel("Mode Finding Start (V):"), 0, 2)
+        self.start_v_spinbox = QDoubleSpinBox()
+        self.start_v_spinbox.setRange(1.5, 6.5)
+        self.start_v_spinbox.setValue(2.5)
+        self.start_v_spinbox.setDecimals(2)
+        self.start_v_spinbox.setSingleStep(0.1)
+        self.start_v_spinbox.setKeyboardTracking(False)
+        pid_layout.addWidget(self.start_v_spinbox, 0, 3)
+
         # I Gain
         pid_layout.addWidget(QLabel("I Gain:"), 1, 0)
         self.i_gain_spinbox = QDoubleSpinBox()
@@ -491,6 +505,16 @@ class CavityControlGUI(QMainWindow):
         self.i_gain_spinbox.setKeyboardTracking(False)  # Only update when Enter is pressed
         self.i_gain_spinbox.valueChanged.connect(self.on_i_gain_changed)
         pid_layout.addWidget(self.i_gain_spinbox, 1, 1)
+
+        # Stop V (for mode finding) - next to I Gain
+        pid_layout.addWidget(QLabel("Mode Finding Stop (V):"), 1, 2)
+        self.stop_v_spinbox = QDoubleSpinBox()
+        self.stop_v_spinbox.setRange(1.5, 6.5)
+        self.stop_v_spinbox.setValue(5.5)
+        self.stop_v_spinbox.setDecimals(2)
+        self.stop_v_spinbox.setSingleStep(0.1)
+        self.stop_v_spinbox.setKeyboardTracking(False)
+        pid_layout.addWidget(self.stop_v_spinbox, 1, 3)
 
         # Bandwidth
         pid_layout.addWidget(QLabel("Bandwidth (Hz):"), 2, 0)
@@ -520,26 +544,6 @@ class CavityControlGUI(QMainWindow):
         self.auto_offset_checkbox.stateChanged.connect(self.on_auto_offset_changed)
         pid_layout.addWidget(self.auto_offset_checkbox, 3, 3)
         
-        # Monitor reflection checkbox
-        pid_layout.addWidget(QLabel("Monitor Reflection:"), 4, 2)
-        self.monitor_reflection_checkbox = QCheckBox()
-        self.monitor_reflection_checkbox.setChecked(False)
-        self.monitor_reflection_checkbox.stateChanged.connect(self.on_monitor_reflection_changed)
-        pid_layout.addWidget(self.monitor_reflection_checkbox, 4, 3)
-
-        # Auto mode finder checkbox
-        pid_layout.addWidget(QLabel("Auto mode finder:"), 5, 2)
-        self.auto_mode_finder_checkbox = QCheckBox()
-        self.auto_mode_finder_checkbox.setChecked(False)
-        self.auto_mode_finder_checkbox.stateChanged.connect(self.on_auto_mode_finder_changed)
-        pid_layout.addWidget(self.auto_mode_finder_checkbox, 5, 3)
-
-        # Find Mode button
-        self.find_mode_button = QPushButton("Find Mode")
-        self.find_mode_button.clicked.connect(self.on_find_mode_clicked)
-        self.find_mode_button.setMaximumWidth(100)
-        pid_layout.addWidget(self.find_mode_button, 6, 2, 1, 2)
-
         # Keep I Value
         pid_layout.addWidget(QLabel("Keep I Value:"), 4, 0)
         keep_i_layout = QHBoxLayout()
@@ -549,6 +553,26 @@ class CavityControlGUI(QMainWindow):
         keep_i_layout.addWidget(self.keep_i_checkbox)
         keep_i_layout.addStretch()
         pid_layout.addLayout(keep_i_layout, 4, 1)
+
+        # Monitor reflection checkbox
+        pid_layout.addWidget(QLabel("Monitor Reflection:"), 4, 2)
+        self.monitor_reflection_checkbox = QCheckBox()
+        self.monitor_reflection_checkbox.setChecked(False)
+        self.monitor_reflection_checkbox.stateChanged.connect(self.on_monitor_reflection_changed)
+        pid_layout.addWidget(self.monitor_reflection_checkbox, 4, 3)
+
+        # Find Mode button
+        self.find_mode_button = QPushButton("Find Mode")
+        self.find_mode_button.clicked.connect(self.on_find_mode_clicked)
+        self.find_mode_button.setMaximumWidth(100)
+        pid_layout.addWidget(self.find_mode_button, 5, 0, 1, 2)
+
+        # Auto mode finder checkbox
+        pid_layout.addWidget(QLabel("Auto mode finder:"), 5, 2)
+        self.auto_mode_finder_checkbox = QCheckBox()
+        self.auto_mode_finder_checkbox.setChecked(False)
+        self.auto_mode_finder_checkbox.stateChanged.connect(self.on_auto_mode_finder_changed)
+        pid_layout.addWidget(self.auto_mode_finder_checkbox, 5, 3)
 
         pid_group.setLayout(pid_layout)
         layout.addWidget(pid_group)
@@ -667,6 +691,16 @@ class CavityControlGUI(QMainWindow):
         self.p_gain_spinbox.valueChanged.connect(self.on_p_gain_changed)
         pid_layout.addWidget(self.p_gain_spinbox, 0, 1)
 
+        # Start V (for mode finding) - next to P Gain
+        pid_layout.addWidget(QLabel("Mode Finding Start (V):"), 0, 2)
+        self.start_v_spinbox = QDoubleSpinBox()
+        self.start_v_spinbox.setRange(1.5, 6.5)
+        self.start_v_spinbox.setValue(2.5)
+        self.start_v_spinbox.setDecimals(2)
+        self.start_v_spinbox.setSingleStep(0.1)
+        self.start_v_spinbox.setKeyboardTracking(False)
+        pid_layout.addWidget(self.start_v_spinbox, 0, 3)
+
         # I Gain
         pid_layout.addWidget(QLabel("I Gain:"), 1, 0)
         self.i_gain_spinbox = QDoubleSpinBox()
@@ -677,6 +711,16 @@ class CavityControlGUI(QMainWindow):
         self.i_gain_spinbox.setKeyboardTracking(False)  # Only update when Enter is pressed
         self.i_gain_spinbox.valueChanged.connect(self.on_i_gain_changed)
         pid_layout.addWidget(self.i_gain_spinbox, 1, 1)
+
+        # Stop V (for mode finding) - next to I Gain
+        pid_layout.addWidget(QLabel("Mode Finding Stop (V):"), 1, 2)
+        self.stop_v_spinbox = QDoubleSpinBox()
+        self.stop_v_spinbox.setRange(1.5, 6.5)
+        self.stop_v_spinbox.setValue(5.5)
+        self.stop_v_spinbox.setDecimals(2)
+        self.stop_v_spinbox.setSingleStep(0.1)
+        self.stop_v_spinbox.setKeyboardTracking(False)
+        pid_layout.addWidget(self.stop_v_spinbox, 1, 3)
 
         # Bandwidth
         pid_layout.addWidget(QLabel("Bandwidth (Hz):"), 2, 0)
@@ -706,26 +750,6 @@ class CavityControlGUI(QMainWindow):
         self.auto_offset_checkbox.stateChanged.connect(self.on_auto_offset_changed)
         pid_layout.addWidget(self.auto_offset_checkbox, 3, 3)
         
-        # Monitor reflection checkbox
-        pid_layout.addWidget(QLabel("Monitor Reflection:"), 4, 2)
-        self.monitor_reflection_checkbox = QCheckBox()
-        self.monitor_reflection_checkbox.setChecked(False)
-        self.monitor_reflection_checkbox.stateChanged.connect(self.on_monitor_reflection_changed)
-        pid_layout.addWidget(self.monitor_reflection_checkbox, 4, 3)
-
-        # Auto mode finder checkbox
-        pid_layout.addWidget(QLabel("Auto mode finder:"), 5, 2)
-        self.auto_mode_finder_checkbox = QCheckBox()
-        self.auto_mode_finder_checkbox.setChecked(False)
-        self.auto_mode_finder_checkbox.stateChanged.connect(self.on_auto_mode_finder_changed)
-        pid_layout.addWidget(self.auto_mode_finder_checkbox, 5, 3)
-
-        # Find Mode button
-        self.find_mode_button = QPushButton("Find Mode")
-        self.find_mode_button.clicked.connect(self.on_find_mode_clicked)
-        self.find_mode_button.setMaximumWidth(100)
-        pid_layout.addWidget(self.find_mode_button, 6, 2, 1, 2)
-
         # Keep I Value
         pid_layout.addWidget(QLabel("Keep I Value:"), 4, 0)
         keep_i_layout = QHBoxLayout()
@@ -735,6 +759,26 @@ class CavityControlGUI(QMainWindow):
         keep_i_layout.addWidget(self.keep_i_checkbox)
         keep_i_layout.addStretch()
         pid_layout.addLayout(keep_i_layout, 4, 1)
+
+        # Monitor reflection checkbox
+        pid_layout.addWidget(QLabel("Monitor Reflection:"), 4, 2)
+        self.monitor_reflection_checkbox = QCheckBox()
+        self.monitor_reflection_checkbox.setChecked(False)
+        self.monitor_reflection_checkbox.stateChanged.connect(self.on_monitor_reflection_changed)
+        pid_layout.addWidget(self.monitor_reflection_checkbox, 4, 3)
+
+        # Find Mode button
+        self.find_mode_button = QPushButton("Find Mode")
+        self.find_mode_button.clicked.connect(self.on_find_mode_clicked)
+        self.find_mode_button.setMaximumWidth(100)
+        pid_layout.addWidget(self.find_mode_button, 5, 0, 1, 2)
+
+        # Auto mode finder checkbox
+        pid_layout.addWidget(QLabel("Auto mode finder:"), 5, 2)
+        self.auto_mode_finder_checkbox = QCheckBox()
+        self.auto_mode_finder_checkbox.setChecked(False)
+        self.auto_mode_finder_checkbox.stateChanged.connect(self.on_auto_mode_finder_changed)
+        pid_layout.addWidget(self.auto_mode_finder_checkbox, 5, 3)
 
         pid_group.setLayout(pid_layout)
         layout.addWidget(pid_group)
@@ -1169,11 +1213,16 @@ class CavityControlGUI(QMainWindow):
             with self.mdrec_lock:
                 self.mdrec.lock_in.set(f'/{self.device_id}/sigouts/0/offset', value)
             
-            # Calculate the new base offset by removing the fine adjustment
-            fine_offset_v = (self.fine_offset_slider.value() * 0.5) / 1000.0
-            self.base_offset = value - fine_offset_v
+            # Reset fine adjustment to 0
+            self.fine_offset_slider.blockSignals(True)
+            self.fine_offset_slider.setValue(0)
+            self.fine_offset_label.setText("0.0 mV")
+            self.fine_offset_slider.blockSignals(False)
             
-            # Update slider to match new base offset (not total)
+            # The spinbox value becomes the new base offset
+            self.base_offset = value
+            
+            # Update slider to match the base offset
             self.offset_slider.blockSignals(True)
             self.offset_slider.setValue(int(self.base_offset * 100))
             self.offset_slider.blockSignals(False)
@@ -1406,7 +1455,9 @@ class CavityControlGUI(QMainWindow):
     def on_find_mode_clicked(self):
         """Handle find mode button click"""
         self.log("Manual mode finding triggered")
-        self.mode_finding_routine
+        # Run mode finding in a separate thread to avoid blocking GUI
+        mode_finding_thread = threading.Thread(target=self.mode_finding_routine, daemon=True)
+        mode_finding_thread.start()
 
     def start_auto_mode_finder(self):
         """Start the background thread for automatic mode finding"""
@@ -1436,23 +1487,14 @@ class CavityControlGUI(QMainWindow):
                             if not self.auto_mode_finder_thread_running:
                                 break
                             time.sleep(0.1)
-                        if not self.is_cavity_locked():
+                        if not self.is_cavity_locked() and not self.mode_finding_in_progress:
                             self.log("Lock lost! Starting mode finding routine...")
-                            # Disable PID before mode finding
-                            self.disable_pid()
-                            # Run mode finding routine
-                            self.mode_finding_routine()
-                            # Mode finding routine will re-enable PID if it was enabled before
-                    else:
-                        self.log("Cavity locked - monitoring")
-                else:
-                    self.log("PID not enabled - waiting")
-                
+                            # Don't disable PID here - let mode_finding_routine handle it
             except Exception as e:
                 self.log(f"Error in auto mode finder: {e}")
             
             # Sleep for 5 seconds, but check frequently if we should stop
-            for _ in range(50):  # Check every 0.1s for 5 seconds total
+            for _ in range(10):  # Check every 0.1s for 5 seconds total
                 if not self.auto_mode_finder_thread_running:
                     break
                 time.sleep(0.1)
@@ -1501,12 +1543,15 @@ class CavityControlGUI(QMainWindow):
                     break
                 time.sleep(0.1)
     
+    
     def _ramp_slow_offset(self, direction='up'):
         """Ramp the slow offset up or down by 15mV in 1mV steps"""
         if self.ramping_in_progress:
             return  # Prevent multiple ramps at once
         
         self.ramping_in_progress = True
+        
+
         
         # Disable slow offset controls during ramping
         self.slow_offset_spinbox.setEnabled(False)
@@ -1598,127 +1643,188 @@ class CavityControlGUI(QMainWindow):
         self.stop_auto_mode_finder()
         event.accept()
 
-    def find_peak_spacing_regularity(self):
+    def number_of_peaks(self, wave):
+        """Count number of peaks in the waveform"""
+        if (np.max(wave) - np.min(wave)) < self.mid_baseline_threshold:
+            return 0  # No signal detected
+        
+        idxs = peakutils.indexes(-wave, thres=0.5, min_dist=50)
+        num_peaks = len(idxs)
+        # self.log(f'Number of peaks found: {num_peaks}')
+        return num_peaks
+
+    def find_peak_spacing_regularity(self, wave):
         """Find peak spacing using scope data"""
-        wave, = self.read_scope_data()
         if (np.max(wave) - np.min(wave)) < self.mid_baseline_threshold:
             return np.inf  # No signal detected
-        idxs = peakutils.indexes(wave)
+        
+        idxs = peakutils.indexes(-wave, thres=0.5, min_dist=50)
+        
+        # Check if we have enough peaks to calculate spacing
+        if len(idxs) < 5:
+            # self.log(f'Not enough peaks found: {len(idxs)}')
+            return np.inf  # Not enough peaks to calculate regularity
+        
         spacings = idxs[1:] - idxs[:-1]
-        self.log(f'Peak spacings (samples): {spacings}')
-        return np.std(spacings)/np.mean(spacings)
+        
+        # Check if we have valid spacings
+        if len(spacings) == 0 or np.mean(spacings) == 0:
+            return np.inf
+        
+        # self.log(f'Peak spacings (samples): {spacings}')
+        return np.std(spacings) / np.mean(spacings)
 
-    def mode_finding_routine(self, start_v=2.5, stop_v=5.5, step_v=0.03, delay_s=0.2,
-                             regularity_threshold=0.1, fine_step_mv=10):
+    def mode_finding_routine(self, step_v=0.01, delay_s=0.1, regularity_threshold=0.3, fine_step=0.01, fine_regularity_threshold=0.2):
         """Finding the cavity mode"""
 
+        start_v = self.start_v_spinbox.value()
+        stop_v = self.stop_v_spinbox.value()
         self.log('Reading current function generator settings.')
         with self.fg_lock:
             prev_amplitude = self.fg.out_amplitude
             prev_frequency = self.fg.out_frequency
+
+        self.log(f'Function generator current amplitude: {prev_amplitude*1000.0:.1f} mV, frequency: {prev_frequency:.1f} Hz')
 
         is_pid_enabled = self.pid_enable_checkbox.isChecked()
         is_dither_enabled = self.dither_enable_checkbox.isChecked()
         is_offset_adjust_enabled = self.auto_offset_checkbox.isChecked()
         is_reflection_monitor_enabled = self.monitor_reflection_checkbox.isChecked()
         is_fg_output_enabled = self.output_checkbox.isChecked()
+        is_mode_finding_enabled = self.auto_mode_finder_checkbox.isChecked()
 
         self.log('Temporarily disabling active routines.')
-        self.disable_pid()
-        if is_dither_enabled:
-            self.dither_enable_checkbox.setChecked(False)
-        if is_offset_adjust_enabled:
-            self.auto_offset_checkbox.setChecked(False)
-        if is_reflection_monitor_enabled:
-            self.monitor_reflection_checkbox.setChecked(False)
+        
+        # Disable PID first (uses its own thread-safe method)
+        if is_pid_enabled:
+            self.disable_pid()
+        
+        # Use thread-safe GUI updates for other checkboxes
+        QMetaObject.invokeMethod(self.dither_enable_checkbox, "setChecked", Qt.BlockingQueuedConnection, Q_ARG(bool, False))
+        QMetaObject.invokeMethod(self.auto_offset_checkbox, "setChecked", Qt.BlockingQueuedConnection, Q_ARG(bool, False))
+        QMetaObject.invokeMethod(self.monitor_reflection_checkbox, "setChecked", Qt.BlockingQueuedConnection, Q_ARG(bool, False))
+        QMetaObject.invokeMethod(self.auto_mode_finder_checkbox, "setChecked", Qt.BlockingQueuedConnection, Q_ARG(bool, False))
 
         self.log('Setting function generator for mode finding.')
-        self.amplitude_fine_slider.setValue(0)  # No fine adjustment
-        self.amplitude_spinbox.setValue(self.mode_finding_settings['fg_amplitude_mv'])  # 1 V amplitude
-        self.freq_spinbox.setValue(self.mode_finding_settings['fg_amplitude_frequency_hz'])  # 120 Hz frequency
-        self.output_checkbox.setChecked(True)
+        
+        # Thread-safe GUI updates for FG settings
+        QMetaObject.invokeMethod(self.amplitude_fine_slider, "setValue", Qt.BlockingQueuedConnection, Q_ARG(int, 0))
+        QMetaObject.invokeMethod(self.amplitude_spinbox, "setValue", Qt.BlockingQueuedConnection, Q_ARG(float, self.mode_finding_settings['fg_amplitude_mv']))
+        QMetaObject.invokeMethod(self.freq_spinbox, "setValue", Qt.BlockingQueuedConnection, Q_ARG(float, self.mode_finding_settings['fg_amplitude_frequency_hz']))
+        QMetaObject.invokeMethod(self.output_checkbox, "setChecked", Qt.BlockingQueuedConnection, Q_ARG(bool, True))
 
-        # Disable controls during mode finding
-        self.find_mode_button.setEnabled(False)
-        self.dither_enable_checkbox.setEnabled(False)
-        self.auto_offset_checkbox.setEnabled(False)
-        self.pid_enable_checkbox.setEnabled(False)
-        self.monitor_reflection_checkbox.setEnabled(False)
-        self.amplitude_spinbox.setEnabled(False)
-        self.amplitude_fine_slider.setEnabled(False)
-        self.freq_spinbox.setEnabled(False)
-        self.output_checkbox.setEnabled(False)
-        self.slow_offset_slider.setEnabled(False)
-        self.slow_offset_fine_slider.setEnabled(False)
-        self.slow_offset_spinbox.setEnabled(False)
-        self.offset_slider.setEnabled(False)
-        self.fine_offset_slider.setEnabled(False)
-        self.offset_spinbox.setEnabled(False)
+        # Disable controls during mode finding - thread-safe
+        for widget in [self.auto_mode_finder_checkbox, self.find_mode_button, self.dither_enable_checkbox,
+                       self.auto_offset_checkbox, self.pid_enable_checkbox, self.monitor_reflection_checkbox,
+                       self.amplitude_spinbox, self.amplitude_fine_slider, self.freq_spinbox, self.output_checkbox,
+                       self.slow_offset_slider, self.slow_offset_fine_slider, self.slow_offset_spinbox,
+                       self.offset_slider, self.fine_offset_slider, self.offset_spinbox]:
+            QMetaObject.invokeMethod(widget, "setEnabled", Qt.BlockingQueuedConnection, Q_ARG(bool, False))
 
         self.log('Starting rough alignment phase...\n\n')
-        self.slow_offset_fine_slider.setValue(0)  # No fine adjustment
-        self.set_slow_offset(start_v)
+        
+        # Reset fine adjustment
+        QMetaObject.invokeMethod(self.slow_offset_fine_slider, "setValue", Qt.BlockingQueuedConnection, Q_ARG(int, 0))
+        
+        found_mode = False
+        wave, dt = self.read_scope_data(length=16384)
+        num_peaks = self.number_of_peaks(wave=wave)
+        if num_peaks >= 5:
+            self.log(f'Initial number of peaks at start offset {start_v:.3f} V is {num_peaks}, starting regularity check.')
+            regularity = self.find_peak_spacing_regularity(wave=wave)
+            if regularity < regularity_threshold:
+                self.log(f'Initial regularity threshold met at offset {start_v:.3f} V (regularity={regularity:.4f}).')
+                found_mode = True
+            else:
+                prev_regularity = regularity
+                current_offset = self.slow_offset_spinbox.value()
+                dir = 1 
+                new_offset = current_offset + dir*step_v
+                QMetaObject.invokeMethod(self.slow_offset_spinbox, "setValue", Qt.BlockingQueuedConnection, Q_ARG(float, new_offset))
+                wave, dt = self.read_scope_data(length=16384)
+                regularity = self.find_peak_spacing_regularity(wave=wave)
+                if regularity > prev_regularity:
+                    dir = -1  # Reverse direction
+                attempts = 0
+                while regularity >= regularity_threshold and current_offset <= stop_v and attempts < 10:
+                    current_offset += dir*step_v
+                    QMetaObject.invokeMethod(self.slow_offset_spinbox, "setValue", Qt.BlockingQueuedConnection, Q_ARG(float, current_offset))
+                    time.sleep(delay_s)
+                    wave, dt = self.read_scope_data(length=16384)
+                    regularity = self.find_peak_spacing_regularity(wave=wave)
+                    if regularity < regularity_threshold:
+                        self.log(f'Regularity threshold met at offset {current_offset:.3f} V (regularity={regularity:.4f}).')
+                        found_mode = True
+                        break
+                    attempts += 1
+
+        # Set initial slow offset
+        QMetaObject.invokeMethod(self.slow_offset_spinbox, "setValue", Qt.BlockingQueuedConnection, Q_ARG(float, start_v))
         current_offset = start_v
         time.sleep(1.0)  # Wait for offset to settle
-        found_mode = False
-        while current_offset <= stop_v:
-            regularity = self.find_peak_spacing_regularity()
-            if regularity < regularity_threshold:
-                self.log(f'Regularity threshold met at offset {current_offset:.3f} V (regularity={regularity:.4f}).')
-                found_mode = True
-                break
-            current_offset += step_v
-            self.set_slow_offset(current_offset)
-            time.sleep(delay_s)  # Wait for offset to settle
 
-        self.amplitude_spinbox.setValue(prev_amplitude*1000.0)  # Convert back to mV
+        if not found_mode:
+            while current_offset <= stop_v:
+                wave, dt = self.read_scope_data(length=16384)
+                regularity = self.find_peak_spacing_regularity(wave=wave)
+                if regularity < regularity_threshold:
+                    self.log(f'Regularity threshold met at offset {current_offset:.3f} V (regularity={regularity:.4f}).')
+                    found_mode = True
+                    break
+                current_offset += step_v
+                QMetaObject.invokeMethod(self.slow_offset_spinbox, "setValue", Qt.BlockingQueuedConnection, Q_ARG(float, current_offset))
+                time.sleep(delay_s)
+
+        # Restore amplitude
+        QMetaObject.invokeMethod(self.amplitude_spinbox, "setValue", Qt.BlockingQueuedConnection, Q_ARG(float, prev_amplitude*1000.0))
 
         if found_mode:
             self.log(f'Found mode at offset {current_offset:.3f} V')
             self.log('Starting fine alignment phase...\n\n')
             
-            current_offset = 0
-            self.offset_spinbox.setValue(current_offset)
-            while current_offset <= 1.0:
-                regularity = self.find_peak_spacing_regularity()
-                if regularity < regularity_threshold:
+            initial_offset = self.offset_spinbox.value()
+            current_offset = max(0, initial_offset - 0.15)
+            QMetaObject.invokeMethod(self.offset_spinbox, "setValue", Qt.BlockingQueuedConnection, Q_ARG(float, current_offset))
+            time.sleep(0.2)
+            
+            while current_offset <= min(1.0, initial_offset + 0.15):
+                wave, dt = self.read_scope_data(length=16384)
+                regularity = self.find_peak_spacing_regularity(wave=wave)
+                if regularity < fine_regularity_threshold:
                     self.log(f'Fine regularity threshold met at offset {current_offset:.3f} V (regularity={regularity:.4f}).')
                     break
-                current_offset += fine_step_mv
-                self.offset_spinbox.setValue(current_offset)
-                time.sleep(delay_s)  # Wait for offset to settle
+                current_offset += fine_step
+                QMetaObject.invokeMethod(self.offset_spinbox, "setValue", Qt.BlockingQueuedConnection, Q_ARG(float, current_offset))
+                time.sleep(delay_s)
         else:
             self.log(f'No mode found between {start_v:.3f} V and {stop_v:.3f} V')
             self.log('Restoring previous settings and re-enabling routines.')
 
-        self.freq_spinbox.setValue(prev_frequency)
+        # Restore settings - thread-safe
+        QMetaObject.invokeMethod(self.freq_spinbox, "setValue", Qt.BlockingQueuedConnection, Q_ARG(float, prev_frequency))
+        
         if not is_fg_output_enabled:
-            self.output_checkbox.setChecked(False)
+            QMetaObject.invokeMethod(self.output_checkbox, "setChecked", Qt.BlockingQueuedConnection, Q_ARG(bool, False))
+        if is_dither_enabled:
+            QMetaObject.invokeMethod(self.dither_enable_checkbox, "setChecked", Qt.BlockingQueuedConnection, Q_ARG(bool, True))
+        if is_offset_adjust_enabled:
+            QMetaObject.invokeMethod(self.auto_offset_checkbox, "setChecked", Qt.BlockingQueuedConnection, Q_ARG(bool, True))
+        if is_reflection_monitor_enabled:
+            QMetaObject.invokeMethod(self.monitor_reflection_checkbox, "setChecked", Qt.BlockingQueuedConnection, Q_ARG(bool, True))
+        if is_mode_finding_enabled:
+            QMetaObject.invokeMethod(self.auto_mode_finder_checkbox, "setChecked", Qt.BlockingQueuedConnection, Q_ARG(bool, True))
+        
+        # Re-enable PID last (uses its own thread-safe method)
         if is_pid_enabled:
             self.enable_pid()
-        if is_dither_enabled:
-            self.dither_enable_checkbox.setChecked(True)
-        if is_offset_adjust_enabled:
-            self.auto_offset_checkbox.setChecked(True)
-        if is_reflection_monitor_enabled:
-            self.monitor_reflection_checkbox.setChecked(True)
 
-        # Enable back controls
-        self.find_mode_button.setEnabled(True)
-        self.dither_enable_checkbox.setEnabled(True)
-        self.auto_offset_checkbox.setEnabled(True)
-        self.pid_enable_checkbox.setEnabled(True)
-        self.monitor_reflection_checkbox.setEnabled(True)
-        self.amplitude_spinbox.setEnabled(True)
-        self.amplitude_fine_slider.setEnabled(True)
-        self.freq_spinbox.setEnabled(True)
-        self.output_checkbox.setEnabled(True)
-        self.slow_offset_slider.setEnabled(True)
-        self.slow_offset_fine_slider.setEnabled(True)
-        self.slow_offset_spinbox.setEnabled(True)
-        self.offset_slider.setEnabled(True)
-        self.fine_offset_slider.setEnabled(True)
-        self.offset_spinbox.setEnabled(True)
+        # Enable back controls - thread-safe
+        for widget in [self.auto_mode_finder_checkbox, self.find_mode_button, self.dither_enable_checkbox,
+                       self.auto_offset_checkbox, self.pid_enable_checkbox, self.monitor_reflection_checkbox,
+                       self.amplitude_spinbox, self.amplitude_fine_slider, self.freq_spinbox, self.output_checkbox,
+                       self.slow_offset_slider, self.slow_offset_fine_slider, self.slow_offset_spinbox,
+                       self.offset_slider, self.fine_offset_slider, self.offset_spinbox]:
+            QMetaObject.invokeMethod(widget, "setEnabled", Qt.BlockingQueuedConnection, Q_ARG(bool, True))
 
     def is_cavity_locked(self):
         """Check if the cavity is locked based on reflection signal"""
@@ -1756,7 +1862,7 @@ class CavityControlGUI(QMainWindow):
                 'length': length,
                 'inputselect': inputselect
             }
-            self.log(f"Scope settings: {settings}")
+            #self.log(f"Scope settings: {settings}")
             return settings
 
     def set_scope_settings(self, settings):
@@ -1768,21 +1874,30 @@ class CavityControlGUI(QMainWindow):
                 self.mdrec.lock_in.setInt(f'/{self.device_id}/scopes/0/length', settings['length'])
             if 'inputselect' in settings.keys():
                 self.mdrec.lock_in.setInt(f'/{self.device_id}/scopes/0/channels/0/inputselect', settings['inputselect'])
-            self.log(f"Scope settings updated to: {settings}")
+            #self.log(f"Scope settings updated to: {settings}")
 
     def log(self, message):
-        """Log message if verbose mode is enabled"""
+        """Log message if verbose mode is enabled - thread-safe"""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         formatted_message = f"[{timestamp}] {message}"
         
         if self.verbose:
             print(formatted_message)
         
-        # Always update GUI log display
-        self.log_text_edit.append(formatted_message)
-        # Auto-scroll to bottom
-        self.log_text_edit.verticalScrollBar().setValue(
-            self.log_text_edit.verticalScrollBar().maximum()
+        # Use QMetaObject.invokeMethod for thread-safe GUI updates
+        QMetaObject.invokeMethod(
+            self.log_text_edit,
+            "append",
+            Qt.QueuedConnection,
+            Q_ARG(str, formatted_message)
+        )
+        
+        # Auto-scroll to bottom (also needs to be thread-safe)
+        QMetaObject.invokeMethod(
+            self.log_text_edit.verticalScrollBar(),
+            "setValue",
+            Qt.QueuedConnection,
+            Q_ARG(int, self.log_text_edit.verticalScrollBar().maximum())
         )
 
 
