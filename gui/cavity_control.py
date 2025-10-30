@@ -82,6 +82,9 @@ class CavityControlGUI(QMainWindow):
         # Initialize UI
         self.init_ui()
         
+        # Mode finding stop flag
+        self.mode_finding_stop_requested = False
+        
     def init_ui(self):
         """Initialize the user interface"""
         self.setWindowTitle('Narrow-linewidth cavity control')
@@ -539,6 +542,13 @@ class CavityControlGUI(QMainWindow):
         self.bandwidth_spinbox.valueChanged.connect(self.on_bandwidth_changed)
         pid_layout.addWidget(self.bandwidth_spinbox, 2, 1)
 
+        # Stop Routine button
+        self.stop_mode_button = QPushButton("Stop Routine")
+        self.stop_mode_button.clicked.connect(self.on_stop_mode_clicked)
+        self.stop_mode_button.setEnabled(False)  # Initially disabled
+        self.stop_mode_button.setVisible(False)  # Initially hidden
+        pid_layout.addWidget(self.stop_mode_button, 2, 2, 1, 2)
+
         # PID Enable
         pid_layout.addWidget(QLabel("PID Enable:"), 3, 0)
         pid_enable_layout = QHBoxLayout()
@@ -744,6 +754,13 @@ class CavityControlGUI(QMainWindow):
         self.bandwidth_spinbox.setKeyboardTracking(False)  # Only update when Enter is pressed
         self.bandwidth_spinbox.valueChanged.connect(self.on_bandwidth_changed)
         pid_layout.addWidget(self.bandwidth_spinbox, 2, 1)
+
+        # Stop Routine button
+        self.stop_mode_button = QPushButton("Stop Routine")
+        self.stop_mode_button.clicked.connect(self.on_stop_mode_clicked)
+        self.stop_mode_button.setEnabled(False)  # Initially disabled
+        self.stop_mode_button.setVisible(False)  # Initially hidden
+        pid_layout.addWidget(self.stop_mode_button, 2, 2, 1, 2)
 
         # PID Enable
         pid_layout.addWidget(QLabel("PID Enable:"), 3, 0)
@@ -1083,6 +1100,11 @@ class CavityControlGUI(QMainWindow):
         self.offset_slider.setEnabled(not is_pid_enabled)
         self.fine_offset_slider.setEnabled(not is_pid_enabled)  # Also disable fine adjustment
 
+    @pyqtSlot()
+    def update_offset_controls_slot(self):
+        """Slot wrapper for thread-safe offset control updates"""
+        self.update_offset_spinbox_state()
+
     def update_status_indicators(self):
         """Update status indicators based on current state"""
         # PID status indicator
@@ -1175,7 +1197,9 @@ class CavityControlGUI(QMainWindow):
         with self.mdrec_lock:
             self.mdrec.lock_in.set(f'/{self.device_id}/pids/{self.dither_pid}/enable', int(enabled))
             
-        self.update_offset_spinbox_state()
+        # Update all offset-related controls
+        self.update_offset_spinbox_state()  # Use the existing method for consistent behavior
+        
         self.update_status_indicators()
         
         if enabled:
@@ -1473,9 +1497,17 @@ class CavityControlGUI(QMainWindow):
     def on_find_mode_clicked(self):
         """Handle find mode button click"""
         self.log("Manual mode finding triggered")
-        # Run mode finding in a separate thread to avoid blocking GUI
+        # No need to directly set button state here - mode finding routine handles it
         mode_finding_thread = threading.Thread(target=self.mode_finding_routine, daemon=True)
         mode_finding_thread.start()
+
+    @pyqtSlot()
+    def on_stop_mode_clicked(self):
+        """Handle stop mode finding button click"""
+        self.log("Routine stop requested")
+        self.mode_finding_stop_requested = True
+        # Use thread-safe method to disable button
+        QMetaObject.invokeMethod(self.stop_mode_button, "setEnabled", Qt.QueuedConnection, Q_ARG(bool, False))
 
     def start_offset_monitoring(self):
         """Start the background thread for offset monitoring when PID is enabled"""
@@ -1501,38 +1533,48 @@ class CavityControlGUI(QMainWindow):
                     # Get current offset from device
                     offset_value = self.get_mdrec_output_offset()
                     
-                    # Batch all GUI updates together
-                    updates = {
-                        (self.offset_spinbox, "setValue"): offset_value,
-                        (self.fine_offset_slider, "setValue"): 0,
-                        (self.fine_offset_label, "setText"): "0.0 mV",
-                        (self.offset_slider, "setValue"): int(offset_value * 100),
-                        (self.output_value_label, "setText"): f"{offset_value:.3f} V"
-                    }
+                    # Update spinbox
+                    self.offset_spinbox.blockSignals(True)
+                    self.offset_spinbox.setValue(offset_value)
+                    self.offset_spinbox.blockSignals(False)
                     
-                    # Update GUI in a single event loop cycle
-                    for (widget, method), value in updates.items():
-                        QMetaObject.invokeMethod(widget, method,
-                                               Qt.QueuedConnection,
-                                               Q_ARG(type(value), value))
+                    # Reset fine adjustment to 0
+                    self.fine_offset_slider.blockSignals(True)
+                    self.fine_offset_slider.setValue(0)
+                    self.fine_offset_label.setText("0.0 mV")
+                    self.fine_offset_slider.blockSignals(False)
                     
-                    # Update instance variable
+                    # Update base offset
                     self.base_offset = offset_value
+                    
+                    # Update slider
+                    self.offset_slider.blockSignals(True)
+                    self.offset_slider.setValue(int(offset_value * 100))
+                    self.offset_slider.blockSignals(False)
+                    
+                    # Update status display
+                    self.output_value_label.setText(f"{offset_value:.3f} V")
                     
             except Exception as e:
                 self.log(f"Error in offset monitor: {e}")
-        
-            # Sleep with shorter intervals and process events
-            for _ in range(5):
+            
+            # Sleep for 0.5 seconds, but check frequently if we should stop
+            for _ in range(5):  # Check every 0.1s for 0.5 seconds total
+
+
+
+
+
+
                 if not self.offset_monitor_thread_running:
                     break
                 time.sleep(0.1)
-                QApplication.processEvents()  # Allow GUI to process events
 
     def start_auto_mode_finder(self):
         """Start the background thread for automatic mode finding"""
         if not self.auto_mode_finder_thread_running:
             self.auto_mode_finder_thread_running = True
+           
             self.auto_mode_finder_thread = threading.Thread(target=self._auto_mode_finder_loop, daemon=True)
             self.auto_mode_finder_thread.start()
             self.log("Auto mode finder started")
@@ -1558,13 +1600,24 @@ class CavityControlGUI(QMainWindow):
                                 break
                             time.sleep(0.1)
                         if not self.is_cavity_locked():
-                            self.log("Lock lost! Starting mode finding routine...")
-                            self.mode_finding_routine()
+                            # Check if another routine is already running
+                            if self.routine_lock.acquire(blocking=False):
+                                # We got the lock, release it and start mode finding
+                                self.routine_lock.release()
+                                try:
+                                    self.log("Lock lost! Starting mode finding routine...")
+                                    self.mode_finding_routine()
+                                except Exception as e:
+                                    self.log(f"Error during mode finding: {str(e)}")
+                            else:
+                                # Another routine is running, skip this check
+                                self.log("Lock lost but another routine is in progress, will retry later")
+            
             except Exception as e:
-                self.log(f"Error in auto mode finder: {e}")
+                self.log(f"Error in auto mode finder loop: {str(e)}")
             
             # Sleep for 5 seconds, but check frequently if we should stop
-            for _ in range(10):  # Check every 0.1s for 5 seconds total
+            for _ in range(50):  # Check every 0.1s for 5 seconds total
                 if not self.auto_mode_finder_thread_running:
                     break
                 time.sleep(0.1)
@@ -1617,9 +1670,18 @@ class CavityControlGUI(QMainWindow):
     
     def _ramp_slow_offset(self, direction='up'):
         """Ramp the slow offset up or down by 15mV in 1mV steps"""
+        self.stop_mode_button.setText("Stop Offset Adjustment")
+        QMetaObject.invokeMethod(self.stop_mode_button, "setVisible", Qt.BlockingQueuedConnection, Q_ARG(bool, True))
+        QMetaObject.invokeMethod(self.stop_mode_button, "setEnabled", Qt.BlockingQueuedConnection, Q_ARG(bool, True))
+        self.stop_mode_button.setStyleSheet("background-color: #FF6666;")  # Brighter red
+        
         # Try to acquire the routine lock without blocking
         if not self.routine_lock.acquire(blocking=False):
             self.log(f"Cannot ramp slow offset - another routine is in progress")
+            # Clean up button state
+            QMetaObject.invokeMethod(self.stop_mode_button, "setEnabled", Qt.BlockingQueuedConnection, Q_ARG(bool, False))
+            QMetaObject.invokeMethod(self.stop_mode_button, "setVisible", Qt.BlockingQueuedConnection, Q_ARG(bool, False))
+            self.stop_mode_button.setStyleSheet("")
             return
         
         try:
@@ -1634,9 +1696,10 @@ class CavityControlGUI(QMainWindow):
             
             # Perform 15 steps
             for i in range(15):
-                if not self.auto_offset_thread_running:
+                if self.mode_finding_stop_requested or not self.auto_offset_thread_running:
+                    self.log("Ramping stopped by user")
                     break
-                
+                    
                 # Get current slow offset and calculate new value
                 current_slow = self.get_mdrec_slow_offset()
                 new_slow = max(1.5, min(6.5, current_slow + step))
@@ -1666,10 +1729,18 @@ class CavityControlGUI(QMainWindow):
             self.slow_offset_slider.setEnabled(True)
             self.slow_offset_fine_slider.setEnabled(True)
             
-            self.auto_offset_status_label.setText("Ramp complete, monitoring...")
-            self.log(f"Ramping {direction} complete")
+            if self.mode_finding_stop_requested:
+                self.log("Ramp routine aborted by user")
+            else:
+                self.auto_offset_status_label.setText("Ramp complete, monitoring...")
+                self.log(f"Ramping {direction} complete")
         finally:
             self.routine_lock.release()
+            # Thread-safe button cleanup - always disable and hide
+            QMetaObject.invokeMethod(self.stop_mode_button, "setEnabled", Qt.BlockingQueuedConnection, Q_ARG(bool, False))
+            QMetaObject.invokeMethod(self.stop_mode_button, "setVisible", Qt.BlockingQueuedConnection, Q_ARG(bool, False))
+            self.stop_mode_button.setStyleSheet("")  # Reset style
+            self.mode_finding_stop_requested = False
 
     def start_reflection_monitoring(self):
         """Start the background thread for reflection monitoring"""
@@ -1746,22 +1817,29 @@ class CavityControlGUI(QMainWindow):
         # self.log(f'Peak spacings (samples): {spacings}')
         return np.std(spacings) / np.mean(spacings)
 
-    def mode_finding_routine(self, step_v=0.01, delay_s=0.1, regularity_threshold=0.25, fine_step=0.01, fine_regularity_threshold=0.2):
+    def mode_finding_routine(self, step_v=0.01, delay_s=0.1, regularity_threshold=0.25, 
+                           fine_step=0.01, fine_regularity_threshold=0.2):
         """Finding the cavity mode"""
+        self.mode_finding_stop_requested = False  # Reset flag
+        # Set button properties directly (Qt handles these safely)
+        self.stop_mode_button.setText("Stop Mode Finding")
+        QMetaObject.invokeMethod(self.stop_mode_button, "setVisible", Qt.BlockingQueuedConnection, Q_ARG(bool, True))
+        QMetaObject.invokeMethod(self.stop_mode_button, "setEnabled", Qt.BlockingQueuedConnection, Q_ARG(bool, True))
+        self.stop_mode_button.setStyleSheet("background-color: #FF6666;")  # Brighter red
+
         # Try to acquire the routine lock without blocking
         if not self.routine_lock.acquire(blocking=False):
             self.log("Cannot start mode finding - another routine is in progress")
+            # Clean up button state properly
+            QMetaObject.invokeMethod(self.stop_mode_button, "setEnabled", Qt.BlockingQueuedConnection, Q_ARG(bool, False))
+            QMetaObject.invokeMethod(self.stop_mode_button, "setVisible", Qt.BlockingQueuedConnection, Q_ARG(bool, False))
+            self.stop_mode_button.setStyleSheet("")  # Reset style
             return
         
         try:
-            # Replace all BlockingQueuedConnection with QueuedConnection
-            def safe_update(widget, method, *args):
-                QMetaObject.invokeMethod(widget, method, 
-                                       Qt.QueuedConnection,  # Changed from BlockingQueuedConnection
-                                       *[Q_ARG(type(arg), arg) for arg in args])
-                QApplication.processEvents()  # Allow GUI to process events
-                time.sleep(0.01)  # Small delay to prevent GUI lockup
-            
+            start_v = self.start_v_spinbox.value()
+            current_offset = self.offset_spinbox.value()
+            stop_v = self.stop_v_spinbox.value()
             self.log('Reading current function generator settings.')
             with self.fg_lock:
                 prev_amplitude = self.fg.out_amplitude
@@ -1783,19 +1861,19 @@ class CavityControlGUI(QMainWindow):
                 self.disable_pid()
             
             # Use thread-safe GUI updates for other checkboxes
-            safe_update(self.dither_enable_checkbox, "setChecked", False)
-            safe_update(self.auto_offset_checkbox, "setChecked", False)
-            safe_update(self.monitor_reflection_checkbox, "setChecked", False)
-            safe_update(self.auto_mode_finder_checkbox, "setChecked", False)
-            
+            QMetaObject.invokeMethod(self.dither_enable_checkbox, "setChecked", Qt.BlockingQueuedConnection, Q_ARG(bool, False))
+            QMetaObject.invokeMethod(self.auto_offset_checkbox, "setChecked", Qt.BlockingQueuedConnection, Q_ARG(bool, False))
+            QMetaObject.invokeMethod(self.monitor_reflection_checkbox, "setChecked", Qt.BlockingQueuedConnection, Q_ARG(bool, False))
+            QMetaObject.invokeMethod(self.auto_mode_finder_checkbox, "setChecked", Qt.BlockingQueuedConnection, Q_ARG(bool, False))
+
             self.log('Setting function generator for mode finding.')
             
             # Thread-safe GUI updates for FG settings
-            safe_update(self.amplitude_fine_slider, "setValue", 0)
-            safe_update(self.amplitude_spinbox, "setValue", self.mode_finding_settings['fg_amplitude_mv'])
-            safe_update(self.freq_spinbox, "setValue", self.mode_finding_settings['fg_amplitude_frequency_hz'])
-            safe_update(self.output_checkbox, "setChecked", True)
-            
+            QMetaObject.invokeMethod(self.amplitude_fine_slider, "setValue", Qt.BlockingQueuedConnection, Q_ARG(int, 0))
+            QMetaObject.invokeMethod(self.amplitude_spinbox, "setValue", Qt.BlockingQueuedConnection, Q_ARG(float, self.mode_finding_settings['fg_amplitude_mv']))
+            QMetaObject.invokeMethod(self.freq_spinbox, "setValue", Qt.BlockingQueuedConnection, Q_ARG(float, self.mode_finding_settings['fg_amplitude_frequency_hz']))
+            QMetaObject.invokeMethod(self.output_checkbox, "setChecked", Qt.BlockingQueuedConnection, Q_ARG(bool, True))
+
             # Disable controls during mode finding - thread-safe
             for widget in [self.auto_mode_finder_checkbox, self.find_mode_button, self.dither_enable_checkbox,
                         self.auto_offset_checkbox, self.pid_enable_checkbox, self.monitor_reflection_checkbox,
@@ -1813,10 +1891,10 @@ class CavityControlGUI(QMainWindow):
             wave, dt = self.read_scope_data(length=16384)
             num_peaks = self.number_of_peaks(wave=wave)
             if num_peaks >= 5:
-                self.log(f'Initial number of peaks at start offset {start_v:.3f} V is {num_peaks}, starting regularity check.')
+                self.log(f'Initial number of peaks at start offset {current_offset:.3f} V is {num_peaks}, starting regularity check.')
                 regularity = self.find_peak_spacing_regularity(wave=wave)
                 if regularity < regularity_threshold:
-                    self.log(f'Initial regularity threshold met at offset {start_v:.3f} V (regularity={regularity:.4f}).')
+                    self.log(f'Initial regularity threshold met at offset {current_offset:.3f} V (regularity={regularity:.4f}).')
                     found_mode = True
                 else:
                     prev_regularity = regularity
@@ -1828,8 +1906,14 @@ class CavityControlGUI(QMainWindow):
                     regularity = self.find_peak_spacing_regularity(wave=wave)
                     if regularity > prev_regularity:
                         dir = -1  # Reverse direction
+                    elif regularity < regularity_threshold:
+                        self.log(f'Regularity threshold met at offset {current_offset:.3f} V (regularity={regularity:.4f}).')
+                        found_mode = True
                     attempts = 0
-                    while regularity >= regularity_threshold and attempts < 10:
+                    while regularity > regularity_threshold and attempts < 10:
+                        if self.mode_finding_stop_requested:
+                            self.log("Mode finding stopped by user")
+                            break
                         current_offset += dir*step_v
                         QMetaObject.invokeMethod(self.slow_offset_spinbox, "setValue", Qt.BlockingQueuedConnection, Q_ARG(float, current_offset))
                         time.sleep(delay_s)
@@ -1847,6 +1931,10 @@ class CavityControlGUI(QMainWindow):
                 current_offset = start_v
                 time.sleep(1.0)  # Wait for offset to settle
                 while current_offset <= stop_v:
+                    if self.mode_finding_stop_requested:
+                        self.log("Mode finding stopped by user")
+                        break
+                        
                     wave, dt = self.read_scope_data(length=16384)
                     regularity = self.find_peak_spacing_regularity(wave=wave)
                     if regularity < regularity_threshold:
@@ -1870,6 +1958,9 @@ class CavityControlGUI(QMainWindow):
                 time.sleep(0.2)
                 
                 while current_offset <= min(1.0, initial_offset + 0.15):
+                    if self.mode_finding_stop_requested:
+                        self.log("Mode finding stopped by user")
+                        break
                     wave, dt = self.read_scope_data(length=16384)
                     regularity = self.find_peak_spacing_regularity(wave=wave)
                     if regularity < fine_regularity_threshold:
@@ -1902,6 +1993,14 @@ class CavityControlGUI(QMainWindow):
                 # Explicitly start offset monitoring after enabling PID
                 self.start_offset_monitoring()
 
+        finally:
+            self.routine_lock.release()
+            # Thread-safe button cleanup - always disable and hide
+            QMetaObject.invokeMethod(self.stop_mode_button, "setEnabled", Qt.BlockingQueuedConnection, Q_ARG(bool, False))
+            QMetaObject.invokeMethod(self.stop_mode_button, "setVisible", Qt.BlockingQueuedConnection, Q_ARG(bool, False))
+            self.stop_mode_button.setStyleSheet("")  # Reset style
+            self.mode_finding_stop_requested = False
+
             # Enable back controls - thread-safe
             for widget in [self.auto_mode_finder_checkbox, self.find_mode_button, self.dither_enable_checkbox,
                         self.auto_offset_checkbox, self.pid_enable_checkbox, self.monitor_reflection_checkbox,
@@ -1909,9 +2008,10 @@ class CavityControlGUI(QMainWindow):
                         self.slow_offset_slider, self.slow_offset_fine_slider, self.slow_offset_spinbox,
                         self.offset_slider, self.fine_offset_slider, self.offset_spinbox]:
                 QMetaObject.invokeMethod(widget, "setEnabled", Qt.BlockingQueuedConnection, Q_ARG(bool, True))
-                
-        finally:
-            self.routine_lock.release()
+            
+            # After all controls are re-enabled, update offset control state based on PID status
+            # This ensures offset controls are disabled if PID was re-enabled
+            self.update_offset_spinbox_state()
 
     def is_cavity_locked(self):
         """Check if the cavity is locked based on reflection signal"""
