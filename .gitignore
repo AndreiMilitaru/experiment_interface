@@ -371,3 +371,4 @@ zhinst_utils/.DS_Store
 /.ipynb_checkpoints/*
 config/mach_zehnder/calibrations/*
 quick_manage_test.ipynb
+*cavity_logs*
