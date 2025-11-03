@@ -1579,31 +1579,54 @@ class CavityControlGUI(QMainWindow):
         """Background thread loop to monitor and update offset spinbox when PID is enabled"""
         while self.offset_monitor_thread_running:
             try:
-                if self.pid_enable_checkbox.isChecked():
+                # Check PID state at the start of each iteration
+                pid_is_enabled = self.pid_enable_checkbox.isChecked()
+                
+                if pid_is_enabled:
                     # Get current offset from device
                     offset_value = self.get_mdrec_output_offset()
                     
-                    # Update spinbox
-                    self.offset_spinbox.blockSignals(True)
-                    self.offset_spinbox.setValue(offset_value)
-                    self.offset_spinbox.blockSignals(False)
+                    # Thread-safe GUI updates
+                    QMetaObject.invokeMethod(
+                        self.offset_spinbox,
+                        "setValue",
+                        Qt.QueuedConnection,
+                        Q_ARG(float, offset_value)
+                    )
                     
                     # Reset fine adjustment to 0
-                    self.fine_offset_slider.blockSignals(True)
-                    self.fine_offset_slider.setValue(0)
-                    self.fine_offset_label.setText("0.0 mV")
-                    self.fine_offset_slider.blockSignals(False)
+                    QMetaObject.invokeMethod(
+                        self.fine_offset_slider,
+                        "setValue",
+                        Qt.QueuedConnection,
+                        Q_ARG(int, 0)
+                    )
                     
-                    # Update base offset
+                    QMetaObject.invokeMethod(
+                        self.fine_offset_label,
+                        "setText",
+                        Qt.QueuedConnection,
+                        Q_ARG(str, "0.0 mV")
+                    )
+                    
+                    # Update base offset (this is safe - it's just a float)
                     self.base_offset = offset_value
                     
                     # Update slider
-                    self.offset_slider.blockSignals(True)
-                    self.offset_slider.setValue(int(offset_value * 100))
-                    self.offset_slider.blockSignals(False)
+                    QMetaObject.invokeMethod(
+                        self.offset_slider,
+                        "setValue",
+                        Qt.QueuedConnection,
+                        Q_ARG(int, int(offset_value * 100))
+                    )
                     
                     # Update status display
-                    self.output_value_label.setText(f"{offset_value:.3f} V")
+                    QMetaObject.invokeMethod(
+                        self.output_value_label,
+                        "setText",
+                        Qt.QueuedConnection,
+                        Q_ARG(str, f"{offset_value:.3f} V")
+                    )
                     
             except Exception as e:
                 self.logger.error(f"Error in offset monitor: {e}")
@@ -1808,7 +1831,7 @@ class CavityControlGUI(QMainWindow):
         while self.reflection_thread_running:
             try:
                 mean_val, std_val = self.get_average_reflection()
-                # Update GUI label - safe because we're just setting text
+                # Format message
                 if np.abs(mean_val) < 1:
                     message = f"{mean_val/1e-3:.3f} ± {std_val/1e-3:.3f} mV"
                 else: 
@@ -1895,6 +1918,7 @@ class CavityControlGUI(QMainWindow):
             QMetaObject.invokeMethod(self.stop_mode_button, "setVisible", Qt.QueuedConnection, Q_ARG(bool, False))
             QMetaObject.invokeMethod(self.stop_mode_button, "setStyleSheet", Qt.QueuedConnection, Q_ARG(str, ""))
             return
+        
         try:
             start_v = self.start_v_spinbox.value()
             current_offset = self.offset_spinbox.value()
@@ -2122,34 +2146,12 @@ class CavityControlGUI(QMainWindow):
             #self.log(f"Scope settings updated to: {settings}")
 
     def log(self, message):
-        """Log message if verbose mode is enabled - thread-safe"""
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        formatted_message = f"[{timestamp}] {message}"
+        """Log message if verbose mode is enabled - thread-safe
         
-        if self.verbose:
-            print(formatted_message)
-        
-        # Use QMetaObject.invokeMethod for thread-safe GUI updates
-        QMetaObject.invokeMethod(
-            self.log_text_edit,
-            "append",
-            Qt.QueuedConnection,
-            Q_ARG(str, formatted_message)
-        )
-        
-        # Auto-scroll to bottom (also needs to be thread-safe)
-        QMetaObject.invokeMethod(
-            self.log_text_edit.verticalScrollBar(),
-            "setValue",
-            Qt.QueuedConnection,
-            Q_ARG(int, self.log_text_edit.verticalScrollBar().maximum())
-        )
-
-        # Log to file if logfile is set
-        if self.logfile is not None:
-            with self._log_lock:
-                with open(self.logfile, "a") as f:
-                    f.write(formatted_message + "\n")
+        DEPRECATED: Use self.logger instead for new code. This method is kept for backwards compatibility.
+        """
+        # Just forward to the logger - it handles everything including file output and GUI updates
+        self.logger.info(message)
 
 
 # Example usage:
@@ -2203,7 +2205,7 @@ if __name__ == "__main__":
     logpath = Path(os.path.join(".", "cavity_logs"))
     # Replace colons in timestamp to avoid invalid filename on Windows
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    logfile = logpath / f"cavity_control_{timestamp}.txt"
+    logfile = logpath / f"cavity_control_{timestamp}.log"
     logfile.parent.mkdir(parents=True, exist_ok=True)  # Create log directory if it doesn't exist
 
     try:
