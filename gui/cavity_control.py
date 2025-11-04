@@ -9,6 +9,10 @@ Values that work well with the offset adjustment routine, as of 29th October 202
 -- PID, p gain 1500 and I gain 1000, with bandwidth 50Hz. 
 -- function generator 40mV (or 60mV also) amplitude and 5Hz frequency (with option keep_offset_zero enabled)
 -- dither tone 500kHz and 5mV strength, with 0 phase shift.
+
+Warnings: the two main bugs known as of November 2025 are the following: the button for stopping the routine does not
+appear when it should, and the Output Settings group is not always disabled once the PID is enabled at the end of
+the mode finding routine. 
 """
 
 import sys
