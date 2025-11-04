@@ -28,7 +28,7 @@ from PyQt5.QtWidgets import (
     QGroupBox, QGridLayout, QFrame, QSizePolicy, QTabWidget,
     QSlider, QTextEdit
 )
-from PyQt5.QtCore import Qt, pyqtSlot, pyqtSignal, QObject, QMetaObject, Q_ARG
+from PyQt5.QtCore import Qt, pyqtSlot, pyqtSignal, QObject, QMetaObject, Q_ARG, QTimer
 from PyQt5.QtGui import QFont, QIcon
 
 
@@ -1559,6 +1559,25 @@ class CavityControlGUI(QMainWindow):
         # Use thread-safe method to disable button
         QMetaObject.invokeMethod(self.stop_mode_button, "setEnabled", Qt.QueuedConnection, Q_ARG(bool, False))
 
+    def _update_button_from_thread(self, text=None, visible=None, enabled=None, style=None):
+        """Helper method to safely update button properties from background threads"""
+        def update():
+            """Perform the actual GUI updates in the main thread"""
+            if text is not None:
+                self.stop_mode_button.setText(text)
+            if visible is not None:
+                self.stop_mode_button.setVisible(visible)
+            if enabled is not None:
+                self.stop_mode_button.setEnabled(enabled)
+            if style is not None:
+                self.stop_mode_button.setStyleSheet(style)
+            # Force layout update
+            if self.stop_mode_button.parent():
+                self.stop_mode_button.parent().layout().activate()
+
+        # Use QTimer to schedule the update in the main thread
+        QTimer.singleShot(0, update)
+
     def start_offset_monitoring(self):
         """Start the background thread for offset monitoring when PID is enabled"""
         if not self.offset_monitor_thread_running:
@@ -1735,20 +1754,19 @@ class CavityControlGUI(QMainWindow):
     
     def _ramp_slow_offset(self, direction='up'):
         """Ramp the slow offset up or down by 15mV in 1mV steps"""
-        # Use thread-safe method to update button text
-        QMetaObject.invokeMethod(self.stop_mode_button, "setText", Qt.QueuedConnection, Q_ARG(str, "Stop Offset Adjustment"))
-        QMetaObject.invokeMethod(self.stop_mode_button, "setVisible", Qt.QueuedConnection, Q_ARG(bool, True))
-        QMetaObject.invokeMethod(self.stop_mode_button, "setEnabled", Qt.QueuedConnection, Q_ARG(bool, True))
-        # Use thread-safe method for stylesheet
-        QMetaObject.invokeMethod(self.stop_mode_button, "setStyleSheet", Qt.QueuedConnection, Q_ARG(str, "background-color: #FF6666;"))
+        # Use helper method for thread-safe button updates
+        self._update_button_from_thread(
+            text="Stop Offset Adjustment",
+            visible=True,
+            enabled=True,
+            style="background-color: #FF6666;"
+        )
         
         # Try to acquire the routine lock without blocking
         if not self.routine_lock.acquire(blocking=False):
             self.logger.warning(f"Cannot ramp slow offset - another routine is in progress")
             # Clean up button state
-            QMetaObject.invokeMethod(self.stop_mode_button, "setEnabled", Qt.QueuedConnection, Q_ARG(bool, False))
-            QMetaObject.invokeMethod(self.stop_mode_button, "setVisible", Qt.QueuedConnection, Q_ARG(bool, False))
-            QMetaObject.invokeMethod(self.stop_mode_button, "setStyleSheet", Qt.QueuedConnection, Q_ARG(str, ""))
+            self._update_button_from_thread(enabled=False, visible=False, style="")
             return
         
         try:
@@ -1805,9 +1823,7 @@ class CavityControlGUI(QMainWindow):
         finally:
             self.routine_lock.release()
             # Thread-safe button cleanup - always disable and hide
-            QMetaObject.invokeMethod(self.stop_mode_button, "setEnabled", Qt.QueuedConnection, Q_ARG(bool, False))
-            QMetaObject.invokeMethod(self.stop_mode_button, "setVisible", Qt.QueuedConnection, Q_ARG(bool, False))
-            QMetaObject.invokeMethod(self.stop_mode_button, "setStyleSheet", Qt.QueuedConnection, Q_ARG(str, ""))
+            self._update_button_from_thread(enabled=False, visible=False, style="")
             self.mode_finding_stop_requested = False
 
     def start_reflection_monitoring(self):
@@ -1904,19 +1920,19 @@ class CavityControlGUI(QMainWindow):
                            fine_step=0.01, fine_regularity_threshold=0.2):
         """Finding the cavity mode"""
         self.mode_finding_stop_requested = False  # Reset flag
-        # Set button properties using thread-safe methods
-        QMetaObject.invokeMethod(self.stop_mode_button, "setText", Qt.QueuedConnection, Q_ARG(str, "Stop Mode Finding"))
-        QMetaObject.invokeMethod(self.stop_mode_button, "setVisible", Qt.QueuedConnection, Q_ARG(bool, True))
-        QMetaObject.invokeMethod(self.stop_mode_button, "setEnabled", Qt.QueuedConnection, Q_ARG(bool, True))
-        QMetaObject.invokeMethod(self.stop_mode_button, "setStyleSheet", Qt.QueuedConnection, Q_ARG(str, "background-color: #FF6666;"))
+        # Use helper method for thread-safe button updates
+        self._update_button_from_thread(
+            text="Stop Mode Finding",
+            visible=True,
+            enabled=True,
+            style="background-color: #FF6666;"
+        )
 
         # Try to acquire the routine lock without blocking
         if not self.routine_lock.acquire(blocking=False):
             self.logger.warning("Cannot start mode finding - another routine is in progress")
             # Clean up button state properly
-            QMetaObject.invokeMethod(self.stop_mode_button, "setEnabled", Qt.QueuedConnection, Q_ARG(bool, False))
-            QMetaObject.invokeMethod(self.stop_mode_button, "setVisible", Qt.QueuedConnection, Q_ARG(bool, False))
-            QMetaObject.invokeMethod(self.stop_mode_button, "setStyleSheet", Qt.QueuedConnection, Q_ARG(str, ""))
+            self._update_button_from_thread(enabled=False, visible=False, style="")
             return
         
         try:
@@ -2079,9 +2095,7 @@ class CavityControlGUI(QMainWindow):
         finally:
             self.routine_lock.release()
             # Thread-safe button cleanup - always disable and hide
-            QMetaObject.invokeMethod(self.stop_mode_button, "setEnabled", Qt.QueuedConnection, Q_ARG(bool, False))
-            QMetaObject.invokeMethod(self.stop_mode_button, "setVisible", Qt.QueuedConnection, Q_ARG(bool, False))
-            QMetaObject.invokeMethod(self.stop_mode_button, "setStyleSheet", Qt.QueuedConnection, Q_ARG(str, ""))
+            self._update_button_from_thread(enabled=False, visible=False, style="")
             self.mode_finding_stop_requested = False
 
             # Enable back controls - thread-safe
@@ -2091,9 +2105,19 @@ class CavityControlGUI(QMainWindow):
                         self.slow_offset_slider, self.slow_offset_fine_slider, self.slow_offset_spinbox,
                         self.offset_slider, self.fine_offset_slider, self.offset_spinbox]:
                 QMetaObject.invokeMethod(widget, "setEnabled", Qt.QueuedConnection, Q_ARG(bool, True))
-            # After all controls are re-enabled, update offset control state based on PID status
-            # This ensures offset controls are disabled if PID was re-enabled
-            self.update_offset_spinbox_state()
+
+            # Create a function to update controls after re-enabling everything
+            def final_state_update():
+                # Update offset control state based on final PID status
+                self.update_offset_spinbox_state()
+                # Force update of enabled states if PID is enabled
+                if self.pid_enable_checkbox.isChecked():
+                    self.offset_spinbox.setEnabled(False)
+                    self.offset_slider.setEnabled(False)
+                    self.fine_offset_slider.setEnabled(False)
+            
+            # Queue the final state update to run after all other GUI updates
+            QTimer.singleShot(100, final_state_update)
 
     def is_cavity_locked(self):
         """Check if the cavity is locked based on reflection signal"""
